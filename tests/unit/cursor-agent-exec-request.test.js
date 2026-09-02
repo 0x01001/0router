@@ -61,6 +61,22 @@ async function runAgent({ frames, stream }) {
 }
 
 describe("CursorExecutor AgentService exec_request handling", () => {
+  it("returns 502 for an empty non-streaming completion", async () => {
+    const { result } = await runAgent({ frames: [], stream: false });
+
+    expect(result.response.status).toBe(502);
+    const payload = await result.response.json();
+    expect(payload.error?.code).toBe("empty_completion");
+  });
+
+  it("emits an SSE error instead of a successful stop for an empty stream", async () => {
+    const { result } = await runAgent({ frames: [], stream: true });
+
+    const events = parseSSE(await result.response.text());
+    expect(events.find((event) => event.error)?.error?.code).toBe("empty_completion");
+    expect(events.some((event) => event.choices?.[0]?.finish_reason === "stop")).toBe(false);
+  });
+
   it("acknowledges a request-context exec request without ending the turn", async () => {
     const { result, written } = await runAgent({
       frames: [execRequestFrame(10), textFrame("hello")],

@@ -10,6 +10,12 @@ import {
   extractTextFromResponse
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
+import {
+  normalizeCursorModelId,
+  resolveCursorUpstreamModel,
+  shouldPromoteThinkingToContent,
+  visibleContentFromThinking,
+} from "../utils/cursorModel.js";
 import { estimateUsage } from "../utils/usageTracking.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { chatChunkSse, sseChunk } from "../utils/sse.js";
@@ -171,19 +177,6 @@ const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
 };
 
-function isComposerModel(model) {
-  const modelId = String(model || "").split("/").pop();
-  return /^composer(?:-|$)/i.test(modelId);
-}
-
-function visibleComposerContentFromThinking(thinking) {
-  if (!thinking) return "";
-  const endTag = "</think>";
-  const endIdx = thinking.lastIndexOf(endTag);
-  if (endIdx < 0) return "";
-  return thinking.slice(endIdx + endTag.length).trimStart();
-}
-
 function decompressPayload(payload, flags) {
   // Check if payload is JSON error (starts with {"error")
   if (payload.length > 10 && payload[0] === 0x7b && payload[1] === 0x22) {
@@ -274,6 +267,26 @@ function createErrorResponse(jsonError) {
   });
 }
 
+function emptyCompletionError(model) {
+  return {
+    message: `Cursor returned an empty completion for model ${model}`,
+    type: "api_error",
+    code: "empty_completion",
+  };
+}
+
+function createEmptyCompletionResponse(model) {
+  return new Response(JSON.stringify({ error: emptyCompletionError(model) }), {
+    status: HTTP_STATUS.BAD_GATEWAY,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function visibleThinkingContent(model, totalThinking) {
+  if (!shouldPromoteThinkingToContent(model)) return "";
+  return visibleContentFromThinking(totalThinking);
+}
+
 export class CursorExecutor extends BaseExecutor {
   constructor() {
     super("cursor", PROVIDERS.cursor);
@@ -301,10 +314,19 @@ export class CursorExecutor extends BaseExecutor {
     const messages = body.messages || [];
     const tools = body.tools || [];
     const reasoningEffort = body.reasoning_effort || null;
+    const modelId = normalizeCursorModelId(model);
+    const upstreamModel = resolveCursorUpstreamModel(model);
+    if (modelId === "default" || modelId === "auto") {
+      debugLog(`[CURSOR] Resolved ${modelId} → ${upstreamModel}`);
+    }
     // Detect Claude Code UA to force Agent mode (issue #643)
     const ua = credentials?.rawHeaders?.["user-agent"] || "";
-    const forceAgentMode = ua.includes("claude-cli") || ua.includes("claude-code") || ua.includes("Claude Code");
-    return generateCursorBody(messages, model, tools, reasoningEffort, forceAgentMode);
+    const forceAgentMode = ua.includes("claude-cli")
+      || ua.includes("claude-code")
+      || ua.includes("Claude Code")
+      || modelId === "default"
+      || modelId === "auto";
+    return generateCursorBody(messages, upstreamModel, tools, reasoningEffort, forceAgentMode);
   }
 
   async makeFetchRequest(url, headers, body, signal, proxyOptions = null) {
@@ -485,6 +507,10 @@ export class CursorExecutor extends BaseExecutor {
 
     const url = `${agentEndpoint}${AGENT_RUN_PATH}`;
     const headers = this.buildHeaders(credentials);
+    const upstreamModel = resolveCursorUpstreamModel(model);
+    if (upstreamModel !== normalizeCursorModelId(model)) {
+      debugLog(`[CURSOR AGENT] Resolved ${model} → ${upstreamModel}`);
+    }
     const requestController = new AbortController();
     if (signal?.addEventListener) {
       signal.addEventListener("abort", () => requestController.abort(signal.reason), { once: true });
@@ -493,7 +519,7 @@ export class CursorExecutor extends BaseExecutor {
     let session;
     try {
       session = this.openAgentHttp2Stream(url, headers, requestController.signal);
-      session.write(buildAgentRunFrame(body.messages || [], model));
+      session.write(buildAgentRunFrame(body.messages || [], upstreamModel));
     } catch (error) {
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
@@ -611,6 +637,15 @@ export class CursorExecutor extends BaseExecutor {
           responseFormat: FORMATS.OPENAI,
         };
       }
+      if (!content.trim()) {
+        return {
+          response: createEmptyCompletionResponse(model),
+          url,
+          headers,
+          transformedBody: body,
+          responseFormat: FORMATS.OPENAI,
+        };
+      }
       return {
         response: new Response(JSON.stringify({
           id: responseId,
@@ -628,10 +663,12 @@ export class CursorExecutor extends BaseExecutor {
     }
 
     const encoder = new TextEncoder();
+    let emittedContent = false;
     const responseStream = new ReadableStream({
       start(controller) {
         consume((event) => {
           if (event.type === "text") {
+            if (event.value.trim()) emittedContent = true;
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { content: event.value } })));
           } else if (event.type === "thinking") {
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { reasoning_content: event.value } })));
@@ -643,7 +680,11 @@ export class CursorExecutor extends BaseExecutor {
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           } else if (event.type === "done") {
-            controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: {}, finishReason: "stop" })));
+            if (!emittedContent) {
+              controller.enqueue(encoder.encode(sseChunk({ error: emptyCompletionError(model) })));
+            } else {
+              controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: {}, finishReason: "stop" })));
+            }
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           }
@@ -819,10 +860,8 @@ export class CursorExecutor extends BaseExecutor {
       if (result.thinking) totalThinking += result.thinking;
     }
 
-    const visibleComposerContent = isComposerModel(model)
-      ? visibleComposerContentFromThinking(totalThinking)
-      : "";
-    const finalContent = totalContent || visibleComposerContent;
+    const visibleThinking = visibleThinkingContent(model, totalThinking);
+    const finalContent = totalContent || visibleThinking;
 
     debugLog(
       `[CURSOR BUFFER] Parsed ${frameCount} frames, toolCallsMap size: ${toolCallsMap.size}, finalized toolCalls: ${toolCalls.length}`
@@ -846,6 +885,9 @@ export class CursorExecutor extends BaseExecutor {
 
     debugLog(`[CURSOR BUFFER] Final toolCalls count: ${toolCalls.length}`);
 
+    if (!finalContent.trim() && toolCalls.length === 0) {
+      return createEmptyCompletionResponse(model);
+    }
 
     const message = {
       role: "assistant",
@@ -1016,9 +1058,9 @@ export class CursorExecutor extends BaseExecutor {
         }));
       }
 
-      if (isComposerModel(model) && result.thinking) {
+      if (shouldPromoteThinkingToContent(model) && result.thinking) {
         totalThinking += result.thinking;
-        const visibleContent = visibleComposerContentFromThinking(totalThinking);
+        const visibleContent = visibleContentFromThinking(totalThinking);
         if (visibleContent.length > emittedComposerThinkingContentLength) {
           const deltaContent = visibleContent.slice(emittedComposerThinkingContentLength);
           emittedComposerThinkingContentLength = visibleContent.length;
@@ -1075,8 +1117,8 @@ export class CursorExecutor extends BaseExecutor {
       }
     }
 
-    if (chunks.length === 0 && toolCalls.length === 0) {
-      chunks.push(chatChunkSse({ id: responseId, created, model, delta: { role: "assistant", content: "" } }));
+    if (!totalContent.trim() && toolCalls.length === 0) {
+      return createEmptyCompletionResponse(model);
     }
 
     const usage = estimateUsage(body, totalContent.length, FORMATS.OPENAI);
