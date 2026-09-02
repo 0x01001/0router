@@ -10,10 +10,11 @@ NODE_BIN ?= $(HOME)/.hermes/node/bin/node
 RUN_TESTS ?= 1
 AUTO_INSTALL_DEPS ?= 1
 REQUIRE_CURSOR_CONTENT ?= 0
+PRESERVE_PREVIOUS_STATIC ?= 1
 STOP_TIMEOUT ?= 20
 HEALTH_TIMEOUT ?= 45
 
-export INSTALL_DIR DATA_DIR PORT NODE_BIN RUN_TESTS AUTO_INSTALL_DEPS REQUIRE_CURSOR_CONTENT STOP_TIMEOUT HEALTH_TIMEOUT
+export INSTALL_DIR DATA_DIR PORT NODE_BIN RUN_TESTS AUTO_INSTALL_DEPS REQUIRE_CURSOR_CONTENT PRESERVE_PREVIOUS_STATIC STOP_TIMEOUT HEALTH_TIMEOUT
 
 .PHONY: help release release-strict release-no-test release-dry-run release-check
 
@@ -30,6 +31,8 @@ help:
 	  '  INSTALL_DIR=~/.local/lib/node_modules/9router' \
 	  '  DATA_DIR=~/.9router PORT=20128 NODE_BIN=~/.hermes/node/bin/node' \
 	  '  AUTO_INSTALL_DEPS=0 (fail instead of installing missing build dependencies)' \
+	  '  Local release label increments automatically: v<version> patch #1, #2, ...' \
+	  '  PRESERVE_PREVIOUS_STATIC=1 (keep one old asset generation for open tabs)' \
 	  '  CURSOR_DEFAULT_UPSTREAM_MODEL=claude-4.5-sonnet'
 
 release:

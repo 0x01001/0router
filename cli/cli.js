@@ -63,6 +63,26 @@ function createSpinner(text) {
 }
 
 const pkg = require("./package.json");
+
+function readLocalPatchNumber() {
+  const environmentValue = process.env.NEXT_PUBLIC_LOCAL_PATCH_NUMBER || "0";
+  if (/^\d+$/.test(environmentValue)) {
+    const fromEnvironment = Number.parseInt(environmentValue, 10);
+    if (Number.isSafeInteger(fromEnvironment) && fromEnvironment > 0) return fromEnvironment;
+  }
+
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(__dirname, "app", ".local-release.json"), "utf8"));
+    return marker.version === pkg.version && Number.isSafeInteger(marker.patchNumber) && marker.patchNumber > 0
+      ? marker.patchNumber
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+const localPatchNumber = readLocalPatchNumber();
+const displayVersion = `${pkg.version}${localPatchNumber ? ` patch #${localPatchNumber}` : ""}`;
 const { ensureSqliteRuntime, buildEnvWithRuntime } = require("./hooks/sqliteRuntime");
 const { ensureTrayRuntime } = require("./hooks/trayRuntime");
 const args = process.argv.slice(2);
@@ -160,7 +180,7 @@ Commands:
 `);
     process.exit(0);
   } else if (args[i] === "--version" || args[i] === "-v") {
-    console.log(pkg.version);
+    console.log(displayVersion);
     process.exit(0);
   }
 }
@@ -568,7 +588,7 @@ async function showInterfaceMenu(latestVersion) {
   const menuItems = [];
 
   if (latestVersion) {
-    menuItems.push({ label: `Update to v${latestVersion} (current: v${pkg.version})`, icon: "⬆" });
+    menuItems.push({ label: `Update to v${latestVersion} (current: v${displayVersion})`, icon: "⬆" });
   }
 
   menuItems.push(
@@ -578,7 +598,7 @@ async function showInterfaceMenu(latestVersion) {
     { label: "Exit", icon: "🚪" }
   );
 
-  const selected = await selectMenu(`Choose Interface (v${pkg.version})`, menuItems, 0, subtitle);
+  const selected = await selectMenu(`Choose Interface (v${displayVersion})`, menuItems, 0, subtitle);
 
   const offset = latestVersion ? 1 : 0;
 
@@ -712,7 +732,7 @@ function startServer(updatePromise) {
     process.removeAllListeners("SIGHUP");
     process.on("SIGHUP", () => {});
 
-    console.log(`\n🚀 ${pkg.name} v${pkg.version}`);
+    console.log(`\n🚀 ${pkg.name} v${displayVersion}`);
     console.log(`Server: http://${displayHost}:${port}`);
 
     waitServerReady(port).then(() => {

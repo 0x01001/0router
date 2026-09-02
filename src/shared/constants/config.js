@@ -1,10 +1,15 @@
 import pkg from "../../../package.json" with { type: "json" };
+import { formatDisplayVersion, parseLocalPatchNumber } from "@/shared/utils/localReleaseVersion";
+
+const localPatchNumber = parseLocalPatchNumber(process.env.NEXT_PUBLIC_LOCAL_PATCH_NUMBER);
 
 // App configuration
 export const APP_CONFIG = {
   name: "9Router Proxy",
   description: "AI Infrastructure Management",
   version: pkg.version,
+  localPatchNumber,
+  displayVersion: formatDisplayVersion(pkg.version, localPatchNumber),
 };
 
 // GitHub configuration

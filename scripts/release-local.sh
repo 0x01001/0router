@@ -9,13 +9,16 @@ NODE_BIN="${NODE_BIN:-$HOME/.hermes/node/bin/node}"
 RUN_TESTS="${RUN_TESTS:-1}"
 AUTO_INSTALL_DEPS="${AUTO_INSTALL_DEPS:-1}"
 REQUIRE_CURSOR_CONTENT="${REQUIRE_CURSOR_CONTENT:-0}"
+PRESERVE_PREVIOUS_STATIC="${PRESERVE_PREVIOUS_STATIC:-1}"
 STOP_TIMEOUT="${STOP_TIMEOUT:-20}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-45}"
 DRY_RUN=0
 
 SOURCE_APP="$ROOT_DIR/cli/app"
+SOURCE_CLI="$ROOT_DIR/cli/cli.js"
 INSTALLED_APP="$INSTALL_DIR/app"
 STAGING_APP="$INSTALL_DIR/app.release-new"
+LOCAL_RELEASE_FILE_NAME=".local-release.json"
 CLI_JS="$INSTALL_DIR/cli.js"
 BACKUP_ROOT="$DATA_DIR/update"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -26,7 +29,12 @@ SWAP_DONE=0
 RELEASE_OK=0
 OLD_CLI_WAS_RUNNING=0
 SERVICE_STOPPED=0
+CLI_UPDATED=0
 OLD_CLI_COMMAND=""
+BASE_VERSION=""
+CURRENT_PATCH_NUMBER=0
+NEXT_PATCH_NUMBER=0
+DISPLAY_VERSION=""
 
 usage() {
   cat <<'EOF'
@@ -41,6 +49,7 @@ Environment overrides:
   RUN_TESTS=0|1
   AUTO_INSTALL_DEPS=0|1
   REQUIRE_CURSOR_CONTENT=0|1
+  PRESERVE_PREVIOUS_STATIC=0|1
   STOP_TIMEOUT=<seconds>
   HEALTH_TIMEOUT=<seconds>
   CURSOR_DEFAULT_UPSTREAM_MODEL=<upstream model>
@@ -76,6 +85,61 @@ validate_safe_path() {
   local name="$1"
   local value="$2"
   [[ -n "$value" && "$value" == /* && "$value" != "/" ]] || fail "$name must be a non-root absolute path: $value"
+}
+
+read_package_version() {
+  "$NODE_BIN" -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    if (typeof pkg.version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(pkg.version)) process.exit(1);
+    process.stdout.write(pkg.version);
+  ' "$ROOT_DIR/package.json"
+}
+
+read_installed_patch_number() {
+  local marker="$INSTALLED_APP/$LOCAL_RELEASE_FILE_NAME"
+  [[ -f "$marker" ]] || {
+    printf '0'
+    return 0
+  }
+
+  "$NODE_BIN" -e '
+    const fs = require("fs");
+    try {
+      const marker = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const expectedVersion = process.argv[2];
+      const patch = marker.patchNumber;
+      process.stdout.write(
+        marker.version === expectedVersion && Number.isSafeInteger(patch) && patch > 0
+          ? String(patch)
+          : "0"
+      );
+    } catch {
+      process.stdout.write("0");
+    }
+  ' "$marker" "$BASE_VERSION"
+}
+
+prepare_local_release_version() {
+  BASE_VERSION="$(read_package_version)" || fail "Could not read a valid semantic version from $ROOT_DIR/package.json"
+  CURRENT_PATCH_NUMBER="$(read_installed_patch_number)"
+  [[ "$CURRENT_PATCH_NUMBER" =~ ^[0-9]+$ ]] || fail "Invalid installed local patch number: $CURRENT_PATCH_NUMBER"
+  NEXT_PATCH_NUMBER=$((CURRENT_PATCH_NUMBER + 1))
+  DISPLAY_VERSION="v$BASE_VERSION patch #$NEXT_PATCH_NUMBER"
+  export NEXT_PUBLIC_LOCAL_PATCH_NUMBER="$NEXT_PATCH_NUMBER"
+}
+
+commit_release_metadata() {
+  local marker="$INSTALLED_APP/$LOCAL_RELEASE_FILE_NAME"
+  printf '{\n  "version": "%s",\n  "patchNumber": %s,\n  "displayVersion": "%s",\n  "releasedAt": "%s"\n}\n' \
+    "$BASE_VERSION" "$NEXT_PATCH_NUMBER" "$DISPLAY_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$marker"
+}
+
+install_cli_launcher() {
+  local staged_cli="$INSTALL_DIR/cli.js.release-new"
+  cp -p -- "$SOURCE_CLI" "$staged_cli"
+  mv -f -- "$staged_cli" "$CLI_JS"
+  CLI_UPDATED=1
 }
 
 port_listener_pids() {
@@ -199,10 +263,60 @@ verify_built_bundle() {
   [[ -f "$SOURCE_APP/custom-server.js" ]] || fail "Missing built custom server: $SOURCE_APP/custom-server.js"
   [[ -f "$SOURCE_APP/.next-cli-build/server/app/api/v1/chat/completions/route.js" ]] || \
     fail "Missing built chat completion route"
+  [[ -d "$SOURCE_APP/.next-cli-build/static" ]] || fail "Missing built Next.js static assets"
+
+  local material_font
+  material_font="$(find "$SOURCE_APP/.next-cli-build/static/media" -maxdepth 1 -type f \
+    -name 'material-symbols-outlined.*.woff2' -print -quit 2>/dev/null || true)"
+  [[ -n "$material_font" ]] || fail "Missing built Material Symbols icon font"
 
   if ! grep -RIl --include='*.js' 'empty_completion' "$SOURCE_APP/.next-cli-build/server" >/dev/null 2>&1; then
     fail "Built bundle does not contain the empty_completion Cursor patch marker"
   fi
+}
+
+preserve_previous_static_assets() {
+  local old_static="$INSTALLED_APP/.next-cli-build/static"
+  local new_static="$STAGING_APP/.next-cli-build/static"
+  local old_manifest="$INSTALLED_APP/.release-current-static-files"
+  local current_manifest="$STAGING_APP/.release-current-static-files"
+  local relative source target copied=0
+
+  (
+    cd "$new_static"
+    find . -type f -print | LC_ALL=C sort
+  ) > "$current_manifest"
+
+  [[ "$PRESERVE_PREVIOUS_STATIC" == "1" ]] || {
+    log "Previous static asset compatibility is disabled"
+    return 0
+  }
+  [[ -d "$old_static" ]] || return 0
+
+  if [[ -f "$old_manifest" ]]; then
+    while IFS= read -r relative; do
+      relative="${relative#./}"
+      [[ -n "$relative" && "$relative" != /* && "$relative" != ".." && "$relative" != ../* && "$relative" != */../* ]] || \
+        fail "Unsafe path in previous static manifest: $relative"
+      source="$old_static/$relative"
+      target="$new_static/$relative"
+      [[ -f "$source" && ! -e "$target" ]] || continue
+      mkdir -p -- "$(dirname -- "$target")"
+      cp -p -- "$source" "$target"
+      copied=$((copied + 1))
+    done < "$old_manifest"
+  else
+    while IFS= read -r -d '' source; do
+      relative="${source#"$old_static"/}"
+      target="$new_static/$relative"
+      [[ ! -e "$target" ]] || continue
+      mkdir -p -- "$(dirname -- "$target")"
+      cp -p -- "$source" "$target"
+      copied=$((copied + 1))
+    done < <(find "$old_static" -type f -print0)
+  fi
+
+  log "Preserved $copied previous-generation static asset(s) for already-open browser tabs"
 }
 
 stage_bundle() {
@@ -210,6 +324,7 @@ stage_bundle() {
   log "Staging built bundle at $STAGING_APP"
   cp -a -- "$SOURCE_APP" "$STAGING_APP"
   [[ -f "$STAGING_APP/custom-server.js" ]] || fail "Staged bundle is incomplete"
+  preserve_previous_static_assets
 }
 
 strict_cursor_probe() {
@@ -251,6 +366,11 @@ rollback() {
   fi
 
   log "Release failed after bundle swap; rolling back"
+
+  if [[ "$CLI_UPDATED" -eq 1 && -f "$BACKUP_DIR/cli.js" ]]; then
+    cp -p -- "$BACKUP_DIR/cli.js" "$CLI_JS"
+    CLI_UPDATED=0
+  fi
 
   local pids pid
   pids="$(cli_pids)"
@@ -300,12 +420,14 @@ require_integer HEALTH_TIMEOUT "$HEALTH_TIMEOUT"
 [[ "$RUN_TESTS" == "0" || "$RUN_TESTS" == "1" ]] || fail "RUN_TESTS must be 0 or 1"
 [[ "$AUTO_INSTALL_DEPS" == "0" || "$AUTO_INSTALL_DEPS" == "1" ]] || fail "AUTO_INSTALL_DEPS must be 0 or 1"
 [[ "$REQUIRE_CURSOR_CONTENT" == "0" || "$REQUIRE_CURSOR_CONTENT" == "1" ]] || fail "REQUIRE_CURSOR_CONTENT must be 0 or 1"
+[[ "$PRESERVE_PREVIOUS_STATIC" == "0" || "$PRESERVE_PREVIOUS_STATIC" == "1" ]] || fail "PRESERVE_PREVIOUS_STATIC must be 0 or 1"
 validate_safe_path INSTALL_DIR "$INSTALL_DIR"
 validate_safe_path DATA_DIR "$DATA_DIR"
 validate_safe_path NODE_BIN "$NODE_BIN"
 [[ "$INSTALL_DIR" != "$DATA_DIR" && "$INSTALL_DIR" != "$DATA_DIR/"* ]] || fail "INSTALL_DIR must not be inside DATA_DIR"
 [[ -d "$ROOT_DIR/.git" ]] || fail "Not a git checkout: $ROOT_DIR"
 [[ -f "$ROOT_DIR/package.json" ]] || fail "Missing root package.json"
+[[ -f "$SOURCE_CLI" ]] || fail "Missing source CLI launcher: $SOURCE_CLI"
 [[ -x "$NODE_BIN" ]] || fail "Node binary is not executable: $NODE_BIN"
 [[ -d "$INSTALL_DIR" ]] || fail "Installed 9Router directory does not exist: $INSTALL_DIR"
 [[ -f "$CLI_JS" ]] || fail "Installed 9Router CLI is missing: $CLI_JS"
@@ -319,12 +441,14 @@ command -v pgrep >/dev/null || fail "pgrep is required"
 [[ -w "$BACKUP_ROOT" || -w "$DATA_DIR" ]] || fail "Backup location is not writable: $BACKUP_ROOT"
 
 capture_cli_state
+prepare_local_release_version
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   cat <<EOF
 [release] DRY RUN — no tests, build, process signals, writes, or swaps were performed.
 [release] Repository:       $ROOT_DIR
 [release] Source bundle:    $SOURCE_APP
+[release] Source CLI:       $SOURCE_CLI
 [release] Installed bundle: $INSTALLED_APP
 [release] Staging bundle:   $STAGING_APP
 [release] Backup directory: $BACKUP_DIR
@@ -334,6 +458,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 [release] Run tests:        $RUN_TESTS
 [release] Auto-install deps: $AUTO_INSTALL_DEPS
 [release] Strict Cursor:    $REQUIRE_CURSOR_CONTENT
+[release] Preserve static:  $PRESERVE_PREVIOUS_STATIC (one previous generation)
+[release] Current patch:    $CURRENT_PATCH_NUMBER (0 means unnumbered)
+[release] Next release:     $DISPLAY_VERSION
 [release] CLI running:      $OLD_CLI_WAS_RUNNING
 EOF
   exit 0
@@ -346,6 +473,7 @@ trap rollback ERR INT TERM EXIT
 log "Repository: $ROOT_DIR"
 log "Installed bundle: $INSTALLED_APP"
 log "Backup: $BACKUP_DIR"
+log "Local release: $DISPLAY_VERSION"
 log "Database, credentials, and MITM state under $DATA_DIR will be preserved"
 
 ensure_build_dependencies
@@ -397,8 +525,11 @@ log "Model catalog exposes cu/default"
 
 strict_cursor_probe
 
+install_cli_launcher
+commit_release_metadata
 RELEASE_OK=1
 trap - ERR INT TERM EXIT
 log "Release completed successfully"
+log "Installed $DISPLAY_VERSION"
 log "Backup retained at: $BACKUP_DIR"
 log "Note: npm i -g 9router@latest may overwrite this patched bundle"
