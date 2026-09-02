@@ -5,8 +5,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { mergeWithDefaults } from "../../src/lib/db/repos/settingsRepo.js";
 
 const originalDataDir = process.env.DATA_DIR;
+const originalEnableRequestLogs = process.env.ENABLE_REQUEST_LOGS;
 let tempDir;
 let db;
 let adapter;
@@ -19,10 +21,10 @@ async function saveDetail(detail) {
 beforeAll(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-details-tab-"));
   process.env.DATA_DIR = tempDir;
+  process.env.ENABLE_REQUEST_LOGS = "false";
   vi.resetModules();
   db = await import("@/lib/db/index.js");
-  await db.initDb();
-  await db.updateSettings({ enableObservability2: true, observabilityBatchSize: 1 });
+  await db.updateSettings({ observabilityEnabled: true, observabilityBatchSize: 1 });
 
   const { getAdapter } = await import("@/lib/db/driver.js");
   adapter = await getAdapter();
@@ -32,6 +34,15 @@ afterAll(() => {
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
+  if (originalEnableRequestLogs === undefined) delete process.env.ENABLE_REQUEST_LOGS;
+  else process.env.ENABLE_REQUEST_LOGS = originalEnableRequestLogs;
+});
+
+describe("observability settings compatibility", () => {
+  it("preserves the legacy enabled setting", () => {
+    expect(mergeWithDefaults({ observabilityEnabled: true }).enableObservability).toBe(true);
+    expect(mergeWithDefaults({ observabilityEnabled: true, enableObservability: false }).enableObservability).toBe(false);
+  });
 });
 
 describe("request details — tab crash-risk cases", () => {
@@ -46,6 +57,19 @@ describe("request details — tab crash-risk cases", () => {
     expect(Array.isArray(res.details)).toBe(true);
     const corrupt = res.details.find((d) => Object.keys(d).length === 0);
     expect(corrupt).toEqual({});
+  });
+
+  it("persists Cursor model ids when request logging is disabled", async () => {
+    await saveDetail({
+      id: "cursor-composer-detail",
+      provider: "cursor",
+      model: "composer-2.5",
+      status: "success",
+      tokens: { prompt_tokens: 1, completion_tokens: 1 },
+    });
+
+    const res = await db.getRequestDetails({ provider: "cursor", model: "composer-2.5" });
+    expect(res.details.some((detail) => detail.id === "cursor-composer-detail")).toBe(true);
   });
 
   it("pagination beyond last page → empty details, valid meta", async () => {

@@ -18,6 +18,25 @@ function textFrame(text) {
   return Buffer.from(wrapConnectRPCFrame(encodeField(1, LEN, update)));
 }
 
+function trailerFrame(payload) {
+  const frame = Buffer.from(wrapConnectRPCFrame(Buffer.from(JSON.stringify(payload))));
+  frame[0] = 0x02;
+  return frame;
+}
+
+const authTrailer = {
+  error: {
+    code: "unauthenticated",
+    message: "Error",
+    details: [{
+      debug: {
+        error: "ERROR_NOT_LOGGED_IN",
+        details: { title: "Authentication error" },
+      },
+    }],
+  },
+};
+
 function stubAgentSession(executor, frames) {
   const written = [];
   const queue = [...frames];
@@ -75,6 +94,32 @@ describe("CursorExecutor AgentService exec_request handling", () => {
     const events = parseSSE(await result.response.text());
     expect(events.find((event) => event.error)?.error?.code).toBe("empty_completion");
     expect(events.some((event) => event.choices?.[0]?.finish_reason === "stop")).toBe(false);
+  });
+
+  it("surfaces a Connect authentication trailer in a stream", async () => {
+    const { result } = await runAgent({ frames: [trailerFrame(authTrailer)], stream: true });
+    const events = parseSSE(await result.response.text());
+    const error = events.find((event) => event.error)?.error;
+
+    expect(error).toEqual({
+      message: "Authentication error",
+      type: "authentication_error",
+      code: "ERROR_NOT_LOGGED_IN",
+    });
+    expect(error?.code).not.toBe("empty_completion");
+    expect(events.some((event) => event.choices?.[0]?.finish_reason === "stop")).toBe(false);
+  });
+
+  it("surfaces a Connect authentication trailer when not streaming", async () => {
+    const { result } = await runAgent({ frames: [trailerFrame(authTrailer)], stream: false });
+    const payload = await result.response.json();
+
+    expect(result.response.status).toBe(401);
+    expect(payload.error).toEqual({
+      message: "Authentication error",
+      type: "authentication_error",
+      code: "ERROR_NOT_LOGGED_IN",
+    });
   });
 
   it("acknowledges a request-context exec request without ending the turn", async () => {

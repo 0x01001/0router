@@ -158,7 +158,7 @@ function decodeAgentFrames(buffer, onFrame) {
     if (flags & COMPRESS_FLAG.GZIP) {
       payload = zlib.gunzipSync(payload);
     }
-    if (!(flags & COMPRESS_FLAG.TRAILER)) onFrame(payload);
+    onFrame(payload, Boolean(flags & COMPRESS_FLAG.TRAILER));
   }
   return pending;
 }
@@ -247,22 +247,36 @@ function readCursorFrame(buffer, offset, frameNum, tag) {
   return { status: "ok", payload, offset: newOffset };
 }
 
-function createErrorResponse(jsonError) {
-  const errorMsg = jsonError?.error?.details?.[0]?.debug?.details?.title
-    || jsonError?.error?.details?.[0]?.debug?.details?.detail
-    || jsonError?.error?.message
-    || "API Error";
-  
-  const isRateLimit = jsonError?.error?.code === "resource_exhausted";
-  
-  return new Response(JSON.stringify({
+function parseCursorError(jsonError) {
+  const debug = jsonError?.error?.details?.[0]?.debug;
+  const code = jsonError?.error?.code;
+  const status = code === "unauthenticated"
+    ? HTTP_STATUS.UNAUTHORIZED
+    : code === "resource_exhausted"
+      ? HTTP_STATUS.RATE_LIMITED
+      : HTTP_STATUS.BAD_REQUEST;
+
+  return {
+    status,
     error: {
-      message: errorMsg,
-      type: isRateLimit ? "rate_limit_error" : "api_error",
-      code: jsonError?.error?.details?.[0]?.debug?.error || "unknown"
-    }
-  }), {
-    status: isRateLimit ? HTTP_STATUS.RATE_LIMITED : HTTP_STATUS.BAD_REQUEST,
+      message: debug?.details?.title
+        || debug?.details?.detail
+        || jsonError?.error?.message
+        || "API Error",
+      type: status === HTTP_STATUS.UNAUTHORIZED
+        ? "authentication_error"
+        : status === HTTP_STATUS.RATE_LIMITED
+          ? "rate_limit_error"
+          : "api_error",
+      code: debug?.error || code || "unknown",
+    },
+  };
+}
+
+function createErrorResponse(jsonError) {
+  const parsed = parseCursorError(jsonError);
+  return new Response(JSON.stringify({ error: parsed.error }), {
+    status: parsed.status,
     headers: { "Content-Type": "application/json" }
   });
 }
@@ -568,10 +582,21 @@ export class CursorExecutor extends BaseExecutor {
           const { done, value } = await session.read();
           if (done) break;
           pending = Buffer.concat([pending, Buffer.from(value)]);
-          pending = decodeAgentFrames(pending, (payload) => {
+          pending = decodeAgentFrames(pending, (payload, isTrailer) => {
             // A single read can carry several frames; once the turn is over the
             // rest of the batch must not reach the already-closed controller.
             if (finished) return;
+            if (isTrailer) {
+              try {
+                const trailer = JSON.parse(payload.toString("utf8"));
+                if (trailer?.error) {
+                  const parsed = parseCursorError(trailer);
+                  finished = true;
+                  onEvent({ type: "error", value: parsed.error, status: parsed.status });
+                }
+              } catch {}
+              return;
+            }
             const serverMessage = decodeMessage(payload);
 
             // agent.v1.AgentServerMessage.interaction_update
@@ -604,7 +629,11 @@ export class CursorExecutor extends BaseExecutor {
                 // turn rather than narrating protocol state as assistant text.
                 debugLog(`[CURSOR AGENT] Unsupported exec request fields: ${[...execRequest.keys()].join(",")}`);
                 finished = true;
-                onEvent({ type: "error", value: "Cursor AgentService requested an unsupported IDE tool" });
+                onEvent({
+                  type: "error",
+                  value: { message: "Cursor AgentService requested an unsupported IDE tool", type: "api_error" },
+                  status: HTTP_STATUS.BAD_REQUEST,
+                });
               }
             }
           });
@@ -623,12 +652,12 @@ export class CursorExecutor extends BaseExecutor {
       await consume((event) => {
         if (event.type === "text") content += event.value;
         else if (event.type === "thinking") reasoning += event.value;
-        else if (event.type === "error") agentError = event.value;
+        else if (event.type === "error") agentError = event;
       });
       if (agentError) {
         return {
-          response: new Response(JSON.stringify({ error: { message: agentError, type: "api_error" } }), {
-            status: HTTP_STATUS.BAD_REQUEST,
+          response: new Response(JSON.stringify({ error: agentError.value }), {
+            status: agentError.status,
             headers: { "Content-Type": "application/json" },
           }),
           url,
@@ -676,7 +705,7 @@ export class CursorExecutor extends BaseExecutor {
             // An SSE error frame, not a content delta: a protocol failure must not
             // be rendered to the user as the assistant's reply, and downstream
             // usage tracking must not record the turn as a success.
-            controller.enqueue(encoder.encode(sseChunk({ error: { message: event.value, type: "api_error" } })));
+            controller.enqueue(encoder.encode(sseChunk({ error: event.value })));
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           } else if (event.type === "done") {

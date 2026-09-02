@@ -33,7 +33,7 @@ help:
 	  '  AUTO_INSTALL_DEPS=0 (fail instead of installing missing build dependencies)' \
 	  '  Local release label increments automatically: v<version> patch #1, #2, ...' \
 	  '  PRESERVE_PREVIOUS_STATIC=1 (keep one old asset generation for open tabs)' \
-	  '  CURSOR_DEFAULT_UPSTREAM_MODEL=claude-4.5-sonnet'
+	  '  CURSOR_DEFAULT_UPSTREAM_MODEL=default'
 
 release:
 	@$(RELEASE_SCRIPT)

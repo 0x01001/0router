@@ -72,7 +72,14 @@ async function readRaw() {
 
 // Merge raw settings with defaults; backward-compat for missing keys
 export function mergeWithDefaults(raw) {
-  const merged = { ...DEFAULT_SETTINGS, ...(raw || {}) };
+  const normalized = { ...(raw || {}) };
+  if (
+    normalized.enableObservability === undefined
+    && typeof normalized.observabilityEnabled === "boolean"
+  ) {
+    normalized.enableObservability = normalized.observabilityEnabled;
+  }
+  const merged = { ...DEFAULT_SETTINGS, ...normalized };
   for (const [key, defVal] of Object.entries(DEFAULT_SETTINGS)) {
     if (merged[key] === undefined) {
       if (
@@ -88,6 +95,7 @@ export function mergeWithDefaults(raw) {
   }
   return merged;
 }
+
 
 export async function getSettings() {
   const raw = await readRaw();

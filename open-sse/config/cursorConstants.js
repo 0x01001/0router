@@ -1,11 +1,12 @@
 /**
  * Cursor upstream model compatibility settings.
  *
- * Keep model ids here instead of hardcoding them in the executor so deployments
- * can override the Auto/default target without changing request handling code.
+ * Keep model ids here instead of hardcoding them in the executor. Cursor's
+ * `default` model is Auto and must remain server-selected; deployments can
+ * still override it for compatibility testing.
  */
 export const CURSOR_DEFAULT_UPSTREAM_MODEL =
-  process.env.CURSOR_DEFAULT_UPSTREAM_MODEL?.trim() || "claude-4.5-sonnet";
+  process.env.CURSOR_DEFAULT_UPSTREAM_MODEL?.trim() || "default";
 
 export const CURSOR_LEGACY_MODEL_MAP = Object.freeze({
   "claude-3-5-sonnet": "claude-4.5-sonnet",

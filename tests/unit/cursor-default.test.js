@@ -35,8 +35,8 @@ function parseSSE(text) {
 describe("Cursor default model compatibility", () => {
   it("normalizes legacy ids and resolves default/auto", () => {
     expect(normalizeCursorModelId("cu/claude-3-5-sonnet-20240620")).toBe("claude-4.5-sonnet");
-    expect(resolveCursorUpstreamModel("cu/default")).toBe("claude-4.5-sonnet");
-    expect(resolveCursorUpstreamModel("auto")).toBe("claude-4.5-sonnet");
+    expect(resolveCursorUpstreamModel("cu/default")).toBe("default");
+    expect(resolveCursorUpstreamModel("auto")).toBe("default");
     expect(shouldPromoteThinkingToContent("cu/default")).toBe(true);
     expect(shouldPromoteThinkingToContent("claude-4.5-sonnet-thinking")).toBe(true);
     expect(shouldPromoteThinkingToContent("gpt-5.3-codex")).toBe(false);

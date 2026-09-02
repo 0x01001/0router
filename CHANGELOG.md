@@ -40,6 +40,12 @@
 - **i18n**: pt-BR expanded to 1132 terms
 
 ## Fixes
+- **Cursor**: surface AgentService Connect trailer errors instead of discarding
+  them and misreporting expired authentication as `empty_completion`
+- **Cursor**: keep `cu/default` mapped to Cursor Auto instead of pinning it to
+  the finite “Other Models” quota pool
+- **Usage**: `ENABLE_REQUEST_LOGS=false` no longer disables request-detail
+  observability while aggregate usage continues recording
 - **Stream**: record usage when a client closes on the terminal event — the
   Responses API has no [DONE] sentinel, so codex closed the socket on
   `response.completed` and cancelled the reader before flush() ran its usage
