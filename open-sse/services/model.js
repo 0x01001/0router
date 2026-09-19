@@ -102,15 +102,10 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
   }
 
   // Get aliases (from object or function)
-  const aliases =
-    typeof aliasesOrGetter === "function"
-      ? await aliasesOrGetter()
-      : aliasesOrGetter;
+  const aliases = typeof aliasesOrGetter === "function" ? await aliasesOrGetter() : aliasesOrGetter;
 
   // Resolve alias
-  const resolved =
-    resolveModelAliasFromMap(parsed.model, aliases) ||
-    resolveModelAliasFromMap(parsed.model, BUILTIN_MODEL_ALIASES);
+  const resolved = resolveModelAliasFromMap(parsed.model, aliases) || resolveModelAliasFromMap(parsed.model, BUILTIN_MODEL_ALIASES);
   if (resolved) {
     return resolved;
   }
@@ -125,6 +120,8 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
 // Config-driven prefix → provider inference (first match wins, fallback "openai").
 const MODEL_PREFIX_PROVIDERS = [
   [/^(default|auto)$/, "cursor"],
+  // Codex CLI sends this bare virtual model for auto-review — keep it on OAuth Codex (#1398).
+  [/^codex-auto-review$/, "codex"],
   [/^claude-/, "anthropic"],
   [/^gemini-/, "gemini"],
   [/^gpt-/, "openai"],
