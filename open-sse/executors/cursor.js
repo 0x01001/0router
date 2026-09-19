@@ -16,6 +16,7 @@ import {
   shouldPromoteThinkingToContent,
   visibleContentFromThinking,
 } from "../utils/cursorModel.js";
+import { CURSOR_DISABLE_AGENT_SERVICE } from "../config/cursorConstants.js";
 import { estimateUsage } from "../utils/usageTracking.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { chatChunkSse, sseChunk } from "../utils/sse.js";
@@ -734,7 +735,7 @@ export class CursorExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    if (isAgentTextRequest(body)) {
+    if (!CURSOR_DISABLE_AGENT_SERVICE && isAgentTextRequest(body)) {
       try {
         return await this.executeAgent({ model, body, stream, credentials, signal });
       } catch (error) {

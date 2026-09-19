@@ -8,6 +8,9 @@
 export const CURSOR_DEFAULT_UPSTREAM_MODEL =
   process.env.CURSOR_DEFAULT_UPSTREAM_MODEL?.trim() || "default";
 
+export const CURSOR_DISABLE_AGENT_SERVICE =
+  process.env.CURSOR_DISABLE_AGENT_SERVICE === "1";
+
 export const CURSOR_LEGACY_MODEL_MAP = Object.freeze({
   "claude-3-5-sonnet": "claude-4.5-sonnet",
   "claude-3-5-sonnet-20241022": "claude-4.5-sonnet",
