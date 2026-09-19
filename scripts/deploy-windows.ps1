@@ -22,7 +22,8 @@
 param(
   [string]$InstallDir = "",
   [int]$Port = 0,
-  [switch]$DryRun
+  [switch]$DryRun,
+  [hashtable]$ReleaseMetadata = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,8 @@ $RootDir = Split-Path -Parent $ScriptDir
 $SourceApp = Join-Path $RootDir "cli\app"
 $SourceCli = Join-Path $RootDir "cli\cli.js"
 $DataDir = Join-Path $env:USERPROFILE ".9router"
+
+. (Join-Path $ScriptDir "local-release-version.ps1")
 
 function Write-Step {
   param([string]$Message)
@@ -61,17 +64,7 @@ Run 'scripts\build-windows.ps1' first (or 'make release' on macOS/Linux), then r
 }
 
 function Resolve-InstallDir {
-  if ($InstallDir -and (Test-Path $InstallDir)) {
-    return (Resolve-Path -LiteralPath $InstallDir).Path
-  }
-
-  $npmRoot = (& npm root -g 2>$null).Trim()
-  if ($npmRoot) {
-    $candidate = Join-Path $npmRoot "9router"
-    if (Test-Path $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
-  }
-
-  throw "Installed 9Router not found. Pass -InstallDir or run: npm i -g 9router"
+  return Get-9RouterInstallDir -InstallDir $InstallDir
 }
 
 function Test-Is9RouterProcess {
@@ -174,13 +167,14 @@ function Start-9Router {
   param([string]$InstallRoot, [string]$CliPath, [int]$ListenPort)
 
   $logFile = Join-Path $DataDir "log.txt"
+  New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
   Write-Step "Starting: node $CliPath --tray --skip-update --port $ListenPort"
-  Start-Process -FilePath "node" `
-    -ArgumentList @($CliPath, "--tray", "--skip-update", "--port", "$ListenPort") `
+  # Start-Process cannot redirect stdout and stderr to the same file; use cmd to merge.
+  $startCmd = "node `"$CliPath`" --tray --skip-update --port $ListenPort >> `"$logFile`" 2>&1"
+  Start-Process -FilePath "cmd.exe" `
+    -ArgumentList @("/c", $startCmd) `
     -WorkingDirectory $InstallRoot `
-    -WindowStyle Hidden `
-    -RedirectStandardOutput $logFile `
-    -RedirectStandardError $logFile | Out-Null
+    -WindowStyle Hidden | Out-Null
 }
 
 function Test-Health {
@@ -224,6 +218,9 @@ if ($DryRun) {
   Write-Step "Backup directory:  $backupDir"
   Write-Step "Port:              $Port"
   Write-Step "Service running:   $wasRunning"
+  if ($ReleaseMetadata) {
+    Write-Step "Release metadata:  $($ReleaseMetadata.DisplayVersion)"
+  }
   exit 0
 }
 
@@ -260,6 +257,15 @@ if ($wasRunning) {
   Write-Step "Server health check passed"
 } else {
   Write-Step "No running instance detected; bundle deployed without starting it"
+}
+
+if ($ReleaseMetadata) {
+  Commit-ReleaseMetadata `
+    -InstalledApp $InstalledApp `
+    -BaseVersion $ReleaseMetadata.BaseVersion `
+    -NextPatchNumber $ReleaseMetadata.NextPatchNumber `
+    -DisplayVersion $ReleaseMetadata.DisplayVersion
+  Write-Step "Recorded local release metadata: $($ReleaseMetadata.DisplayVersion)"
 }
 
 Write-Step "Deploy completed successfully"

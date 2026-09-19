@@ -7,7 +7,8 @@
 param(
   [switch]$DryRun,
   [switch]$SkipTests,
-  [switch]$Strict
+  [switch]$Strict,
+  [string]$InstallDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,8 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RootDir = Split-Path -Parent $ScriptDir
 $CliDir = Join-Path $RootDir "cli"
+
+. (Join-Path $ScriptDir "local-release-version.ps1")
 
 function Write-Step {
   param([string]$Message)
@@ -56,7 +59,7 @@ function Invoke-Tests {
 }
 
 function Invoke-Build {
-  Write-Step "Building production CLI bundle"
+  Write-Step "Building production CLI bundle ($($script:ReleaseInfo.DisplayVersion))"
   Push-Location $RootDir
   try {
     npm --prefix cli run build
@@ -72,12 +75,23 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm is requir
 $runTests = -not $SkipTests -and ($env:RUN_TESTS -ne "0")
 $requireCursor = $Strict -or ($env:REQUIRE_CURSOR_CONTENT -eq "1")
 
+$resolvedInstallDir = Get-9RouterInstallDir -InstallDir $InstallDir
+$installedApp = Join-Path $resolvedInstallDir "app"
+if (-not (Test-Path -LiteralPath $installedApp)) {
+  throw "Installed 9Router app bundle is missing: $installedApp"
+}
+
+$script:ReleaseInfo = Prepare-LocalReleaseVersion -RootDir $RootDir -InstalledApp $installedApp
+
 if ($DryRun) {
   Write-Step "DRY RUN - no tests, build, or deploy will run."
-  Write-Step "Repository: $RootDir"
-  Write-Step "Run tests:  $runTests"
+  Write-Step "Repository:       $RootDir"
+  Write-Step "Installed bundle: $installedApp"
+  Write-Step "Run tests:        $runTests"
   Write-Step "Strict Cursor probe: $requireCursor"
-  & "$ScriptDir\deploy-windows.ps1" -DryRun
+  Write-Step "Current patch:    $($script:ReleaseInfo.CurrentPatchNumber) (0 means unnumbered)"
+  Write-Step "Next release:     $($script:ReleaseInfo.DisplayVersion)"
+  & "$ScriptDir\deploy-windows.ps1" -DryRun -InstallDir $resolvedInstallDir
   exit 0
 }
 
@@ -89,12 +103,21 @@ if ($runTests) {
   Write-Step "WARNING: tests skipped"
 }
 
+Write-Step "Local release: $($script:ReleaseInfo.DisplayVersion)"
 Invoke-Build
 
-& "$ScriptDir\deploy-windows.ps1"
+& "$ScriptDir\deploy-windows.ps1" `
+  -InstallDir $resolvedInstallDir `
+  -ReleaseMetadata @{
+    BaseVersion     = $script:ReleaseInfo.BaseVersion
+    NextPatchNumber = $script:ReleaseInfo.NextPatchNumber
+    DisplayVersion  = $script:ReleaseInfo.DisplayVersion
+  }
 
 if ($requireCursor) {
   Write-Step "Strict Cursor probe is not automated on Windows yet; use macOS/Linux make release-strict for full rollback probe."
 }
 
 Write-Step "Release completed successfully"
+Write-Step "Installed $($script:ReleaseInfo.DisplayVersion)"
+Write-Step "Note: npm i -g 9router@latest may overwrite this patched bundle"
