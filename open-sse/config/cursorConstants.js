@@ -8,6 +8,9 @@
 export const CURSOR_DEFAULT_UPSTREAM_MODEL =
   process.env.CURSOR_DEFAULT_UPSTREAM_MODEL?.trim() || "default";
 
+// AgentService is the supported Cursor proxy path (ChatService at api2 returns
+// HTTP 429 "Update Required"). Disable only when debugging legacy ChatService:
+// CURSOR_DISABLE_AGENT_SERVICE=1
 export const CURSOR_DISABLE_AGENT_SERVICE =
   process.env.CURSOR_DISABLE_AGENT_SERVICE === "1";
 

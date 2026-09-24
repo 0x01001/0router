@@ -173,6 +173,14 @@ function createRequestContextResponse() {
   return wrapConnectRPCFrame(agentMessage(2, execClientMessage));
 }
 
+function createExecStubResponse(execField) {
+  // Proxy mode cannot run editor-backed tools. Ack with an empty success on the
+  // matching ExecClientMessage field so the AgentService turn can continue.
+  const stubSuccess = agentMessage(1, new Uint8Array());
+  const execClientMessage = agentMessage(execField, stubSuccess);
+  return wrapConnectRPCFrame(agentMessage(2, execClientMessage));
+}
+
 const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
 const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
@@ -625,16 +633,11 @@ export class CursorExecutor extends BaseExecutor {
               if (execRequest.has(10)) {
                 session.write(createRequestContextResponse());
               } else {
-                // Every other ExecServerMessage variant is an editor-backed tool
-                // (shell, read, write, …) that 9router cannot service. Fail the
-                // turn rather than narrating protocol state as assistant text.
-                debugLog(`[CURSOR AGENT] Unsupported exec request fields: ${[...execRequest.keys()].join(",")}`);
-                finished = true;
-                onEvent({
-                  type: "error",
-                  value: { message: "Cursor AgentService requested an unsupported IDE tool", type: "api_error" },
-                  status: HTTP_STATUS.BAD_REQUEST,
-                });
+                const execFields = [...execRequest.keys()];
+                debugLog(`[CURSOR AGENT] Stubbing exec request fields: ${execFields.join(",")}`);
+                for (const field of execFields) {
+                  session.write(createExecStubResponse(field));
+                }
               }
             }
           });
