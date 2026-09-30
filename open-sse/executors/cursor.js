@@ -12,6 +12,7 @@ import {
   decodeMcpArgs,
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
+import { shouldPromoteThinkingToContent, visibleContentFromThinking } from "../utils/cursorModel.js";
 import { estimateUsage } from "../utils/usageTracking.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { chatChunkSse, sseChunk } from "../utils/sse.js";
@@ -239,19 +240,6 @@ const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
 const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
 };
-
-function isComposerModel(model) {
-  const modelId = String(model || "").split("/").pop();
-  return /^composer(?:-|$)/i.test(modelId);
-}
-
-function visibleComposerContentFromThinking(thinking) {
-  if (!thinking) return "";
-  const endTag = "</think>";
-  const endIdx = thinking.lastIndexOf(endTag);
-  if (endIdx < 0) return "";
-  return thinking.slice(endIdx + endTag.length).trimStart();
-}
 
 function decompressPayload(payload, flags) {
   // Check if payload is JSON error (starts with {"error")
@@ -603,7 +591,7 @@ export class CursorExecutor extends BaseExecutor {
     // so strict clients such as Claude Code accept the completed stream.
     const responseId = `chatcmpl-msg_${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
-    const composerModel = isComposerModel(model);
+    const composerModel = shouldPromoteThinkingToContent(model);
     let pending = Buffer.alloc(0);
     let finished = false;
     let thinkingAcc = "";
@@ -613,7 +601,7 @@ export class CursorExecutor extends BaseExecutor {
     const flushThinkingFallback = (onEvent) => {
       if (emittedText || !thinkingAcc) return;
       const fallback = composerModel
-        ? visibleComposerContentFromThinking(thinkingAcc)
+        ? visibleContentFromThinking(thinkingAcc)
         : thinkingAcc.trim();
       if (fallback) {
         emittedText = true;
@@ -650,7 +638,7 @@ export class CursorExecutor extends BaseExecutor {
                 if (thinkingDelta) {
                   thinkingAcc += thinkingDelta;
                   if (composerModel) {
-                    const visible = visibleComposerContentFromThinking(thinkingAcc);
+                    const visible = visibleContentFromThinking(thinkingAcc);
                     if (visible.length > emittedVisible) {
                       const deltaContent = visible.slice(emittedVisible);
                       emittedVisible = visible.length;
@@ -994,10 +982,23 @@ export class CursorExecutor extends BaseExecutor {
       if (result.thinking) totalThinking += result.thinking;
     }
 
-    const visibleComposerContent = isComposerModel(model)
-      ? visibleComposerContentFromThinking(totalThinking)
+    const visibleComposerContent = shouldPromoteThinkingToContent(model)
+      ? visibleContentFromThinking(totalThinking)
       : "";
     const finalContent = totalContent || visibleComposerContent;
+
+    if (!finalContent && toolCallsMap.size === 0) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "Cursor returned an empty completion",
+            type: "api_error",
+            code: "empty_completion"
+          }
+        }),
+        { status: HTTP_STATUS.BAD_GATEWAY, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     debugLog(
       `[CURSOR BUFFER] Parsed ${frameCount} frames, toolCallsMap size: ${toolCallsMap.size}, finalized toolCalls: ${toolCalls.length}`
@@ -1191,9 +1192,9 @@ export class CursorExecutor extends BaseExecutor {
         }));
       }
 
-      if (isComposerModel(model) && result.thinking) {
+      if (shouldPromoteThinkingToContent(model) && result.thinking) {
         totalThinking += result.thinking;
-        const visibleContent = visibleComposerContentFromThinking(totalThinking);
+        const visibleContent = visibleContentFromThinking(totalThinking);
         if (visibleContent.length > emittedComposerThinkingContentLength) {
           const deltaContent = visibleContent.slice(emittedComposerThinkingContentLength);
           emittedComposerThinkingContentLength = visibleContent.length;
