@@ -187,7 +187,10 @@ export function canonicalizeUsage(usage) {
   if (usage.cached_tokens === undefined &&
       (usage.cache_read_input_tokens !== undefined || usage.cache_creation_input_tokens !== undefined)) {
     cached = num(usage.cache_read_input_tokens);
-    prompt = prompt + cached + cacheCreation;
+    // The Claude→OpenAI translator leaves state.usage with BOTH a cache-inclusive
+    // prompt_tokens and the exclusive input_tokens. Fold onto input_tokens when
+    // present, otherwise cache is counted twice.
+    prompt = num(usage.input_tokens ?? usage.prompt_tokens) + cached + cacheCreation;
   } else {
     // OpenAI/Gemini path (or already-canonical input): prompt already includes cached_tokens.
     // Mirror the cacheCreation fallback above: buildUsage() only ever emits the

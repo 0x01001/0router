@@ -100,6 +100,20 @@ describe("canonicalizeUsage", () => {
     expect(out.cached_tokens).toBe(0);
     expect(out.cache_creation_input_tokens).toBe(500);
   });
+
+  it("does not double-count cache when translator state carries inclusive prompt_tokens + exclusive input_tokens", () => {
+    // Shape left in state.usage by claude-to-openai.js (761 + 105090 + 1016 = 106867)
+    const out = canonicalizeUsage({
+      prompt_tokens: 106867,
+      input_tokens: 761,
+      completion_tokens: 50,
+      cache_read_input_tokens: 105090,
+      cache_creation_input_tokens: 1016,
+    });
+    expect(out.prompt_tokens).toBe(106867);
+    expect(out.cached_tokens).toBe(105090);
+    expect(out.cache_creation_input_tokens).toBe(1016);
+  });
 });
 
 describe("calculateCostFromTokens (canonical inclusive convention)", () => {
