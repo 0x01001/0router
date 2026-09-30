@@ -7,20 +7,16 @@ import {
   wrapConnectRPCFrame,
   decodeMessage,
   parseConnectRPCFrame,
-  extractTextFromResponse
+  extractTextFromResponse,
+  encodeMcpTools,
+  decodeMcpArgs,
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
-import {
-  normalizeCursorModelId,
-  resolveCursorUpstreamModel,
-  shouldPromoteThinkingToContent,
-  visibleContentFromThinking,
-} from "../utils/cursorModel.js";
-import { CURSOR_DISABLE_AGENT_SERVICE } from "../config/cursorConstants.js";
 import { estimateUsage } from "../utils/usageTracking.js";
 import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { chatChunkSse, sseChunk } from "../utils/sse.js";
 import { FORMATS } from "../translator/formats.js";
+import { ROLE, OPENAI_BLOCK } from "../translator/schema/index.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import zlib from "zlib";
 import crypto from "crypto";
@@ -72,55 +68,74 @@ function textFromContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .filter((part) => part?.type === OPENAI_BLOCK.TEXT && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n");
 }
 
-function isAgentTextRequest(body) {
-  // Many compatible clients always attach their built-in tool schemas, even
-  // for a normal text turn. Cursor's retired ChatService rejects those
-  // requests; AgentService can still answer the text turn, so ignore schemas
-  // here. A real tool-call/result conversation is kept on the legacy path
-  // until its AgentService tool protocol is implemented.
-  return Array.isArray(body?.messages) && body.messages.every((message) => {
-    if (message?.tool_calls?.length || message?.role === "tool") return false;
-    return typeof message?.content === "string"
-      || Array.isArray(message?.content) && message.content.every((part) => part?.type === "text");
+function isTextPart(part) {
+  return !part || part.type === OPENAI_BLOCK.TEXT || typeof part === "string";
+}
+
+export function isAgentCapableRequest(body) {
+  // ChatService rejects auto/composer and most thinking variants. AgentService
+  // can answer text turns (including declared tool schemas) and tool-call
+  // history. Image parts still need the legacy protobuf path.
+  if (!Array.isArray(body?.messages) || body.messages.length === 0) return false;
+  return body.messages.every((message) => {
+    if (Array.isArray(message?.content)) return message.content.every(isTextPart);
+    return message?.content == null || typeof message.content === "string";
   });
 }
 
 function encodeHistoryMessage(message) {
   const content = textFromContent(message?.content);
-  if (!content) return null;
+  const extras = [];
+  if (message?.role === ROLE.ASSISTANT && message.tool_calls?.length) {
+    for (const tc of message.tool_calls) {
+      extras.push(`[tool_call id=${tc.id || ""} name=${tc.function?.name || "tool"} args=${tc.function?.arguments || "{}"}]`);
+    }
+  }
+  if (message?.role === ROLE.TOOL) {
+    extras.push(`[tool_result id=${message.tool_call_id || ""}]`);
+  }
+  const textBody = [content, ...extras].filter(Boolean).join("\n");
+  if (!textBody) return null;
 
   // ConversationHistoryMessage.user / .assistant -> repeated content -> text.
-  const text = agentString(1, content);
-  if (message.role === "assistant") {
+  const text = agentString(1, textBody);
+  if (message.role === ROLE.ASSISTANT) {
     return agentMessage(2, agentMessage(1, agentMessage(1, text)));
   }
   return agentMessage(1, agentMessage(1, agentMessage(1, text)));
 }
 
-function buildAgentRunFrame(messages, model) {
+export function buildAgentRunFrame(messages, model, tools = []) {
+  // custom_system_prompt (RunRequest field 8) makes AgentService return an
+  // empty turn. Fold system text into the current user message instead.
   const system = messages
-    .filter((message) => message?.role === "system")
+    .filter((message) => message?.role === ROLE.SYSTEM)
     .map((message) => textFromContent(message.content))
     .filter(Boolean)
     .join("\n\n");
-  const chatMessages = messages.filter((message) => message?.role !== "system");
-  const currentIndex = [...chatMessages].map((message) => message?.role).lastIndexOf("user");
+  const chatMessages = messages.filter((message) => message?.role !== ROLE.SYSTEM);
+  const currentIndex = [...chatMessages].map((message) => message?.role).lastIndexOf(ROLE.USER);
   const current = currentIndex >= 0 ? chatMessages[currentIndex] : chatMessages.at(-1);
   const history = chatMessages
     .slice(0, currentIndex >= 0 ? currentIndex : -1)
     .map(encodeHistoryMessage)
     .filter(Boolean);
-  const userText = textFromContent(current?.content) || "Continue.";
+  const rawUser = textFromContent(current?.content) || "Continue.";
+  const userText = system ? `${system}\n\n${rawUser}` : rawUser;
 
   // agent.v1.UserMessageAction.user_message and its optional history.
+  // selected_context (3) + mode=1 (4) match cursor-agent's wire format; without
+  // them the server may accept the RPC and stream an empty turn.
   const userMessage = concatBuffers(
     agentString(1, userText),
     agentString(2, crypto.randomUUID()),
+    agentMessage(3, new Uint8Array()),
+    encodeField(4, PROTOBUF_VARINT, 1),
   );
   const conversationHistory = history.length
     ? concatBuffers(...history.map((entry) => agentMessage(1, entry)))
@@ -131,11 +146,20 @@ function buildAgentRunFrame(messages, model) {
   );
   const conversationAction = agentMessage(1, userAction);
   const requestedModel = concatBuffers(agentString(1, model), agentBool(7, true));
+  // ModelDetails (field 3): thinking variants (Composer, Grok, *-thinking)
+  // return an empty turn when only RequestedModel (field 9) is set.
+  const modelDetails = concatBuffers(
+    agentString(1, model),
+    agentString(3, model),
+    agentString(4, model),
+  );
+  const mcpTools = encodeMcpTools(tools);
   const runRequest = concatBuffers(
     // An empty ConversationStateStructure starts a fresh local agent session.
     agentMessage(1, new Uint8Array()),
     agentMessage(2, conversationAction),
-    ...(system ? [agentString(8, system)] : []),
+    agentMessage(3, modelDetails),
+    ...(mcpTools.length ? [agentMessage(4, mcpTools)] : []),
     agentMessage(9, requestedModel),
   );
 
@@ -159,32 +183,75 @@ function decodeAgentFrames(buffer, onFrame) {
     if (flags & COMPRESS_FLAG.GZIP) {
       payload = zlib.gunzipSync(payload);
     }
-    onFrame(payload, Boolean(flags & COMPRESS_FLAG.TRAILER));
+    if (!(flags & COMPRESS_FLAG.TRAILER)) onFrame(payload);
   }
   return pending;
 }
 
-function createRequestContextResponse() {
-  // AgentService asks every run for client context. 9router has no IDE file
-  // context, so acknowledge with an empty RequestContext.
-  const requestContextSuccess = agentMessage(1, new Uint8Array());
-  const requestContextResult = agentMessage(1, requestContextSuccess);
-  const execClientMessage = agentMessage(10, requestContextResult);
-  return wrapConnectRPCFrame(agentMessage(2, execClientMessage));
+function execIds(execRequest) {
+  const id = Number(execRequest?.get(1)?.[0]?.value || 0);
+  const execId = extractAgentString(execRequest, 15);
+  return { id, execId };
 }
 
-function createExecStubResponse(execField) {
-  // Proxy mode cannot run editor-backed tools. Ack with an empty success on the
-  // matching ExecClientMessage field so the AgentService turn can continue.
-  const stubSuccess = agentMessage(1, new Uint8Array());
-  const execClientMessage = agentMessage(execField, stubSuccess);
-  return wrapConnectRPCFrame(agentMessage(2, execClientMessage));
+function wrapExecClientMessage(execMsgId, execId, resultField, resultPayload) {
+  const parts = [];
+  if (execMsgId) parts.push(encodeField(1, PROTOBUF_VARINT, execMsgId));
+  parts.push(agentString(15, execId || ""));
+  parts.push(encodeField(resultField, PROTOBUF_LEN, resultPayload || new Uint8Array()));
+  return wrapConnectRPCFrame(agentMessage(2, concatBuffers(...parts)));
+}
+
+function createRequestContextResponse(execRequest) {
+  // Tools already go out on AgentRunRequest.mcp_tools. Echoing them again on
+  // this ack makes AgentService stall silently (0 SSE bytes until abort).
+  const { id, execId } = execIds(execRequest);
+  const requestContextSuccess = agentMessage(1, new Uint8Array());
+  const requestContextResult = agentMessage(1, requestContextSuccess);
+  return wrapExecClientMessage(id, execId, 10, requestContextResult);
+}
+
+// ExecServerMessage variant → ExecClientMessage result field (same numbers).
+const EXEC_RESULT_FIELD = {
+  2: 2, 3: 3, 4: 4, 5: 5, 7: 7, 8: 8, 9: 9, 16: 16, 20: 20, 23: 23,
+};
+
+function rejectExecRequest(execRequest) {
+  const { id, execId } = execIds(execRequest);
+  const variant = [...(execRequest?.keys?.() || [])].find((field) => field !== 1 && field !== 15);
+  const resultField = EXEC_RESULT_FIELD[variant];
+  if (!resultField) return null;
+  // Diagnostics has no rejected variant — empty success unblocks the stream.
+  if (variant === 9) return wrapExecClientMessage(id, execId, 9, new Uint8Array());
+  const rejected = agentMessage(2, agentString(2, "Tool not available in this environment. Use the MCP tools provided instead."));
+  return wrapExecClientMessage(id, execId, resultField, rejected);
+}
+
+function encodeKvClientMessage(kvId, resultField, resultPayload, metadata) {
+  const parts = [];
+  if (kvId) parts.push(encodeField(1, PROTOBUF_VARINT, kvId));
+  parts.push(encodeField(resultField, PROTOBUF_LEN, resultPayload || new Uint8Array()));
+  if (metadata && metadata.length) parts.push(encodeField(4, PROTOBUF_LEN, metadata));
+  return wrapConnectRPCFrame(agentMessage(3, concatBuffers(...parts)));
 }
 
 const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
 const debugLog = (...args) => {
   if (CURSOR_STREAM_DEBUG) console.log(...args);
 };
+
+function isComposerModel(model) {
+  const modelId = String(model || "").split("/").pop();
+  return /^composer(?:-|$)/i.test(modelId);
+}
+
+function visibleComposerContentFromThinking(thinking) {
+  if (!thinking) return "";
+  const endTag = "</think>";
+  const endIdx = thinking.lastIndexOf(endTag);
+  if (endIdx < 0) return "";
+  return thinking.slice(endIdx + endTag.length).trimStart();
+}
 
 function decompressPayload(payload, flags) {
   // Check if payload is JSON error (starts with {"error")
@@ -256,58 +323,24 @@ function readCursorFrame(buffer, offset, frameNum, tag) {
   return { status: "ok", payload, offset: newOffset };
 }
 
-function parseCursorError(jsonError) {
-  const debug = jsonError?.error?.details?.[0]?.debug;
-  const code = jsonError?.error?.code;
-  const status = code === "unauthenticated"
-    ? HTTP_STATUS.UNAUTHORIZED
-    : code === "resource_exhausted"
-      ? HTTP_STATUS.RATE_LIMITED
-      : HTTP_STATUS.BAD_REQUEST;
-
-  return {
-    status,
-    error: {
-      message: debug?.details?.title
-        || debug?.details?.detail
-        || jsonError?.error?.message
-        || "API Error",
-      type: status === HTTP_STATUS.UNAUTHORIZED
-        ? "authentication_error"
-        : status === HTTP_STATUS.RATE_LIMITED
-          ? "rate_limit_error"
-          : "api_error",
-      code: debug?.error || code || "unknown",
-    },
-  };
-}
-
 function createErrorResponse(jsonError) {
-  const parsed = parseCursorError(jsonError);
-  return new Response(JSON.stringify({ error: parsed.error }), {
-    status: parsed.status,
+  const errorMsg = jsonError?.error?.details?.[0]?.debug?.details?.title
+    || jsonError?.error?.details?.[0]?.debug?.details?.detail
+    || jsonError?.error?.message
+    || "API Error";
+  
+  const isRateLimit = jsonError?.error?.code === "resource_exhausted";
+  
+  return new Response(JSON.stringify({
+    error: {
+      message: errorMsg,
+      type: isRateLimit ? "rate_limit_error" : "api_error",
+      code: jsonError?.error?.details?.[0]?.debug?.error || "unknown"
+    }
+  }), {
+    status: isRateLimit ? HTTP_STATUS.RATE_LIMITED : HTTP_STATUS.BAD_REQUEST,
     headers: { "Content-Type": "application/json" }
   });
-}
-
-function emptyCompletionError(model) {
-  return {
-    message: `Cursor returned an empty completion for model ${model}`,
-    type: "api_error",
-    code: "empty_completion",
-  };
-}
-
-function createEmptyCompletionResponse(model) {
-  return new Response(JSON.stringify({ error: emptyCompletionError(model) }), {
-    status: HTTP_STATUS.BAD_GATEWAY,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function visibleThinkingContent(model, totalThinking) {
-  if (!shouldPromoteThinkingToContent(model)) return "";
-  return visibleContentFromThinking(totalThinking);
 }
 
 export class CursorExecutor extends BaseExecutor {
@@ -337,19 +370,10 @@ export class CursorExecutor extends BaseExecutor {
     const messages = body.messages || [];
     const tools = body.tools || [];
     const reasoningEffort = body.reasoning_effort || null;
-    const modelId = normalizeCursorModelId(model);
-    const upstreamModel = resolveCursorUpstreamModel(model);
-    if (modelId === "default" || modelId === "auto") {
-      debugLog(`[CURSOR] Resolved ${modelId} → ${upstreamModel}`);
-    }
     // Detect Claude Code UA to force Agent mode (issue #643)
     const ua = credentials?.rawHeaders?.["user-agent"] || "";
-    const forceAgentMode = ua.includes("claude-cli")
-      || ua.includes("claude-code")
-      || ua.includes("Claude Code")
-      || modelId === "default"
-      || modelId === "auto";
-    return generateCursorBody(messages, upstreamModel, tools, reasoningEffort, forceAgentMode);
+    const forceAgentMode = ua.includes("claude-cli") || ua.includes("claude-code") || ua.includes("Claude Code");
+    return generateCursorBody(messages, model, tools, reasoningEffort, forceAgentMode);
   }
 
   async makeFetchRequest(url, headers, body, signal, proxyOptions = null) {
@@ -524,25 +548,22 @@ export class CursorExecutor extends BaseExecutor {
     };
   }
 
-  async executeAgent({ model, body, stream, credentials, signal }) {
+  async executeAgent({ model, body, stream, credentials, signal, log }) {
     const agentEndpoint = PROVIDER_OAUTH.cursor?.agentEndpoint;
     if (!agentEndpoint) throw new Error("Cursor AgentService endpoint is not configured");
 
     const url = `${agentEndpoint}${AGENT_RUN_PATH}`;
     const headers = this.buildHeaders(credentials);
-    const upstreamModel = resolveCursorUpstreamModel(model);
-    if (upstreamModel !== normalizeCursorModelId(model)) {
-      debugLog(`[CURSOR AGENT] Resolved ${model} → ${upstreamModel}`);
-    }
     const requestController = new AbortController();
     if (signal?.addEventListener) {
       signal.addEventListener("abort", () => requestController.abort(signal.reason), { once: true });
     }
 
     let session;
+    const tools = body.tools || [];
     try {
       session = this.openAgentHttp2Stream(url, headers, requestController.signal);
-      session.write(buildAgentRunFrame(body.messages || [], upstreamModel));
+      session.write(buildAgentRunFrame(body.messages || [], model, tools));
     } catch (error) {
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
@@ -582,8 +603,23 @@ export class CursorExecutor extends BaseExecutor {
     // so strict clients such as Claude Code accept the completed stream.
     const responseId = `chatcmpl-msg_${Date.now()}`;
     const created = Math.floor(Date.now() / 1000);
+    const composerModel = isComposerModel(model);
     let pending = Buffer.alloc(0);
     let finished = false;
+    let thinkingAcc = "";
+    let emittedVisible = 0;
+    let emittedText = false;
+
+    const flushThinkingFallback = (onEvent) => {
+      if (emittedText || !thinkingAcc) return;
+      const fallback = composerModel
+        ? visibleComposerContentFromThinking(thinkingAcc)
+        : thinkingAcc.trim();
+      if (fallback) {
+        emittedText = true;
+        onEvent({ type: "text", value: fallback });
+      }
+    };
 
     const consume = async (onEvent) => {
       try {
@@ -591,21 +627,10 @@ export class CursorExecutor extends BaseExecutor {
           const { done, value } = await session.read();
           if (done) break;
           pending = Buffer.concat([pending, Buffer.from(value)]);
-          pending = decodeAgentFrames(pending, (payload, isTrailer) => {
+          pending = decodeAgentFrames(pending, (payload) => {
             // A single read can carry several frames; once the turn is over the
             // rest of the batch must not reach the already-closed controller.
             if (finished) return;
-            if (isTrailer) {
-              try {
-                const trailer = JSON.parse(payload.toString("utf8"));
-                if (trailer?.error) {
-                  const parsed = parseCursorError(trailer);
-                  finished = true;
-                  onEvent({ type: "error", value: parsed.error, status: parsed.status });
-                }
-              } catch {}
-              return;
-            }
             const serverMessage = decodeMessage(payload);
 
             // agent.v1.AgentServerMessage.interaction_update
@@ -613,30 +638,86 @@ export class CursorExecutor extends BaseExecutor {
               const update = decodeMessage(serverMessage.get(1)[0].value);
               if (update.has(1)) {
                 const textDelta = extractAgentString(decodeMessage(update.get(1)[0].value), 1);
-                if (textDelta) onEvent({ type: "text", value: textDelta });
+                if (textDelta) {
+                  emittedText = true;
+                  onEvent({ type: "text", value: textDelta });
+                }
               }
-              // Cursor's AgentService emits internal reasoning without the
-              // cryptographic signature required by Anthropic thinking blocks.
-              // Forwarding it makes strict Anthropic clients (Claude Code)
-              // discard or wait on an otherwise complete response. Keep the
-              // reasoning upstream-only and emit the normal answer text.
+              // thinking_delta (field 4). Composer (and some Grok variants) put
+              // the visible answer after </think> here and never send text_delta.
+              if (update.has(4)) {
+                const thinkingDelta = extractAgentString(decodeMessage(update.get(4)[0].value), 1);
+                if (thinkingDelta) {
+                  thinkingAcc += thinkingDelta;
+                  if (composerModel) {
+                    const visible = visibleComposerContentFromThinking(thinkingAcc);
+                    if (visible.length > emittedVisible) {
+                      const deltaContent = visible.slice(emittedVisible);
+                      emittedVisible = visible.length;
+                      emittedText = true;
+                      onEvent({ type: "text", value: deltaContent });
+                    }
+                  }
+                }
+              }
+              // Keep unsigned reasoning upstream-only for Anthropic clients.
               if (update.has(14)) {
+                flushThinkingFallback(onEvent);
                 finished = true;
                 onEvent({ type: "done" });
               }
             }
 
+            // KvServerMessage (field 4): get/set blob. Ack so the stream proceeds.
+            if (serverMessage.has(4)) {
+              const kv = decodeMessage(serverMessage.get(4)[0].value);
+              const kvId = kv.get(1)?.[0]?.value || 0;
+              const metadata = kv.get(4)?.[0]?.value || null;
+              if (kv.has(2)) {
+                session.write(encodeKvClientMessage(kvId, 2, agentMessage(1, new Uint8Array()), metadata));
+              } else if (kv.has(3)) {
+                session.write(encodeKvClientMessage(kvId, 3, new Uint8Array(), metadata));
+              }
+            }
+
             // AgentService requests IDE context before producing a response.
-            // Return an empty context; 9router is not coupled to an editor.
             if (serverMessage.has(2)) {
               const execRequest = decodeMessage(serverMessage.get(2)[0].value);
               if (execRequest.has(10)) {
-                session.write(createRequestContextResponse());
+                log?.info?.("CURSOR", "AgentService request_context ack");
+                session.write(createRequestContextResponse(execRequest));
+              } else if (execRequest.has(11)) {
+                const mcp = decodeMcpArgs(execRequest.get(11)[0].value);
+                const name = mcp.toolName || mcp.name;
+                if (name) {
+                  log?.info?.("CURSOR", `AgentService MCP tool_call ${name}`);
+                  finished = true;
+                  onEvent({
+                    type: "tool_call",
+                    value: {
+                      id: mcp.toolCallId || `call_${crypto.randomUUID()}`,
+                      name,
+                      arguments: JSON.stringify(mcp.args || {}),
+                    },
+                  });
+                  onEvent({ type: "done", finishReason: "tool_calls" });
+                } else {
+                  debugLog(`[CURSOR AGENT] Unsupported exec request fields: ${[...execRequest.keys()].join(",")}`);
+                  finished = true;
+                  onEvent({ type: "error", value: "Cursor AgentService requested an unsupported IDE tool" });
+                }
               } else {
-                const execFields = [...execRequest.keys()];
-                debugLog(`[CURSOR AGENT] Stubbing exec request fields: ${execFields.join(",")}`);
-                for (const field of execFields) {
-                  session.write(createExecStubResponse(field));
+                // Auto/Composer often probe IDE builtins (shell/read/…). Reject
+                // them so the model can continue with MCP tools or a text answer
+                // instead of stalling the h2 stream.
+                const rejection = rejectExecRequest(execRequest);
+                if (rejection) {
+                  log?.info?.("CURSOR", `AgentService rejected IDE exec fields=${[...execRequest.keys()].join(",")}`);
+                  session.write(rejection);
+                } else {
+                  debugLog(`[CURSOR AGENT] Unsupported exec request fields: ${[...execRequest.keys()].join(",")}`);
+                  finished = true;
+                  onEvent({ type: "error", value: "Cursor AgentService requested an unsupported IDE tool" });
                 }
               }
             }
@@ -645,7 +726,10 @@ export class CursorExecutor extends BaseExecutor {
       } finally {
         try { session.end(); } catch {}
         try { session.close(); } catch {}
-        if (!finished) onEvent({ type: "done" });
+        if (!finished) {
+          flushThinkingFallback(onEvent);
+          onEvent({ type: "done" });
+        }
       }
     };
 
@@ -653,15 +737,26 @@ export class CursorExecutor extends BaseExecutor {
       let content = "";
       let reasoning = "";
       let agentError = null;
+      const toolCalls = [];
+      let finishReason = "stop";
       await consume((event) => {
         if (event.type === "text") content += event.value;
         else if (event.type === "thinking") reasoning += event.value;
-        else if (event.type === "error") agentError = event;
+        else if (event.type === "tool_call") {
+          toolCalls.push({
+            id: event.value.id,
+            type: "function",
+            function: { name: event.value.name, arguments: event.value.arguments },
+          });
+          finishReason = "tool_calls";
+        }
+        else if (event.type === "error") agentError = event.value;
+        else if (event.type === "done" && event.finishReason) finishReason = event.finishReason;
       });
       if (agentError) {
         return {
-          response: new Response(JSON.stringify({ error: agentError.value }), {
-            status: agentError.status,
+          response: new Response(JSON.stringify({ error: { message: agentError, type: "api_error" } }), {
+            status: HTTP_STATUS.BAD_REQUEST,
             headers: { "Content-Type": "application/json" },
           }),
           url,
@@ -670,22 +765,19 @@ export class CursorExecutor extends BaseExecutor {
           responseFormat: FORMATS.OPENAI,
         };
       }
-      if (!content.trim()) {
-        return {
-          response: createEmptyCompletionResponse(model),
-          url,
-          headers,
-          transformedBody: body,
-          responseFormat: FORMATS.OPENAI,
-        };
-      }
+      const message = {
+        role: "assistant",
+        content: content || null,
+        ...(reasoning ? { reasoning_content: reasoning } : {}),
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      };
       return {
         response: new Response(JSON.stringify({
           id: responseId,
           object: "chat.completion",
           created,
           model,
-          choices: [{ index: 0, message: { role: "assistant", content: content || null, ...(reasoning ? { reasoning_content: reasoning } : {}) }, finish_reason: "stop" }],
+          choices: [{ index: 0, message, finish_reason: finishReason }],
           usage: estimateUsage(body, content.length, FORMATS.OPENAI),
         }), { headers: { "Content-Type": "application/json" } }),
         url,
@@ -696,28 +788,37 @@ export class CursorExecutor extends BaseExecutor {
     }
 
     const encoder = new TextEncoder();
-    let emittedContent = false;
     const responseStream = new ReadableStream({
       start(controller) {
         consume((event) => {
           if (event.type === "text") {
-            if (event.value.trim()) emittedContent = true;
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { content: event.value } })));
           } else if (event.type === "thinking") {
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { reasoning_content: event.value } })));
+          } else if (event.type === "tool_call") {
+            controller.enqueue(encoder.encode(chatChunkSse({
+              id: responseId, created, model,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: event.value.id,
+                  type: "function",
+                  function: { name: event.value.name, arguments: event.value.arguments },
+                }],
+              },
+            })));
           } else if (event.type === "error") {
             // An SSE error frame, not a content delta: a protocol failure must not
             // be rendered to the user as the assistant's reply, and downstream
             // usage tracking must not record the turn as a success.
-            controller.enqueue(encoder.encode(sseChunk({ error: event.value })));
+            controller.enqueue(encoder.encode(sseChunk({ error: { message: event.value, type: "api_error" } })));
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           } else if (event.type === "done") {
-            if (!emittedContent) {
-              controller.enqueue(encoder.encode(sseChunk({ error: emptyCompletionError(model) })));
-            } else {
-              controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: {}, finishReason: "stop" })));
-            }
+            controller.enqueue(encoder.encode(chatChunkSse({
+              id: responseId, created, model, delta: {},
+              finishReason: event.finishReason || "stop",
+            })));
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           }
@@ -738,9 +839,9 @@ export class CursorExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    if (!CURSOR_DISABLE_AGENT_SERVICE && isAgentTextRequest(body)) {
+    if (isAgentCapableRequest(body)) {
       try {
-        return await this.executeAgent({ model, body, stream, credentials, signal });
+        return await this.executeAgent({ model, body, stream, credentials, signal, log });
       } catch (error) {
         return {
           response: new Response(JSON.stringify({
@@ -893,8 +994,10 @@ export class CursorExecutor extends BaseExecutor {
       if (result.thinking) totalThinking += result.thinking;
     }
 
-    const visibleThinking = visibleThinkingContent(model, totalThinking);
-    const finalContent = totalContent || visibleThinking;
+    const visibleComposerContent = isComposerModel(model)
+      ? visibleComposerContentFromThinking(totalThinking)
+      : "";
+    const finalContent = totalContent || visibleComposerContent;
 
     debugLog(
       `[CURSOR BUFFER] Parsed ${frameCount} frames, toolCallsMap size: ${toolCallsMap.size}, finalized toolCalls: ${toolCalls.length}`
@@ -918,9 +1021,6 @@ export class CursorExecutor extends BaseExecutor {
 
     debugLog(`[CURSOR BUFFER] Final toolCalls count: ${toolCalls.length}`);
 
-    if (!finalContent.trim() && toolCalls.length === 0) {
-      return createEmptyCompletionResponse(model);
-    }
 
     const message = {
       role: "assistant",
@@ -1091,9 +1191,9 @@ export class CursorExecutor extends BaseExecutor {
         }));
       }
 
-      if (shouldPromoteThinkingToContent(model) && result.thinking) {
+      if (isComposerModel(model) && result.thinking) {
         totalThinking += result.thinking;
-        const visibleContent = visibleContentFromThinking(totalThinking);
+        const visibleContent = visibleComposerContentFromThinking(totalThinking);
         if (visibleContent.length > emittedComposerThinkingContentLength) {
           const deltaContent = visibleContent.slice(emittedComposerThinkingContentLength);
           emittedComposerThinkingContentLength = visibleContent.length;
@@ -1150,8 +1250,8 @@ export class CursorExecutor extends BaseExecutor {
       }
     }
 
-    if (!totalContent.trim() && toolCalls.length === 0) {
-      return createEmptyCompletionResponse(model);
+    if (chunks.length === 0 && toolCalls.length === 0) {
+      chunks.push(chatChunkSse({ id: responseId, created, model, delta: { role: "assistant", content: "" } }));
     }
 
     const usage = estimateUsage(body, totalContent.length, FORMATS.OPENAI);
