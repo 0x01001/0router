@@ -3,7 +3,7 @@ import REGISTRY from "../providers/registry/index.js";
 // PROVIDER_MODELS now built from providers/registry (transport + models co-located)
 import { PROVIDER_MODELS } from "../providers/index.js";
 import { modelQuotaFamily, modelStrip, modelTargetFormat, modelSupportedFormats, normalizeModelId } from "../providers/models/schema.js";
-import { CODEX_REVIEW_SUFFIX, isMuseSparkModel, opencodeFamilyFormats } from "../providers/models/helpers.js";
+import { CODEX_REVIEW_SUFFIX, isMuseSparkModel, opencodeFamilyFormats, parseCodexFastModel } from "../providers/models/helpers.js";
 import { FORMATS } from "../translator/formats.js";
 export { PROVIDER_MODELS };
 
@@ -35,10 +35,23 @@ function findModel(models, modelId, aliasOrId) {
     : modelId;
   const found = models.find(m => m.id === modelId || m.id === baseModelId);
   if (found) return found;
+  const fast = getCodexFastModel(aliasOrId === "cx" ? baseModelId : null);
+  if (fast) return findModel(models, fast.model, aliasOrId);
   if (!DOT_VERSION_PROVIDERS.has(aliasOrId)) return undefined;
   const normalized = normalizeModelId(baseModelId);
   if (normalized === baseModelId) return undefined;
   return models.find(m => m.id === normalized);
+}
+
+// Codex Fast mode id ("<id>-fast" / "<id>-<effort>-fast", no "(level)" suffix) → { model, effort }.
+// null for non-fast ids, real registry ids, and non-LLM (image) bases.
+export function getCodexFastModel(modelId) {
+  const fast = parseCodexFastModel(modelId);
+  if (!fast) return null;
+  const models = PROVIDER_MODELS.cx || [];
+  if (models.some(m => m.id === modelId)) return null;
+  const base = models.find(m => m.id === fast.model);
+  return base && (base.kind || base.type || "llm") !== "llm" ? null : fast;
 }
 
 export function isValidModel(aliasOrId, modelId, passthroughProviders = new Set()) {
@@ -94,6 +107,9 @@ export function getModelUpstreamId(aliasOrId, modelId) {
   const sufMatch = typeof modelId === "string" ? modelId.match(/\([^()]+\)\s*$/) : null;
   const suffix = sufMatch ? sufMatch[0] : "";
   const baseId = suffix ? modelId.slice(0, sufMatch.index).trim() : modelId;
+  const fast = aliasOrId === "cx" ? getCodexFastModel(baseId) : null;
+  // Keep the fast tail on the mapped id (review → base) so the Codex executor still sees it.
+  if (fast) return getModelUpstreamId("cx", fast.model) + baseId.slice(fast.model.length) + suffix;
   const models = PROVIDER_MODELS[aliasOrId];
   const found = findModel(models, baseId, aliasOrId);
   const resolvedId = found?.upstreamModelId || found?.id;

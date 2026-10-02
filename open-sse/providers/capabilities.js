@@ -34,6 +34,7 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import { parseCodexFastModel } from "./models/helpers.js";
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -569,6 +570,9 @@ function isCommandCodeTextOnly(model) {
 }
 export function getCapabilitiesForModel(provider, model) {
   if (!model) return { ...DEFAULT_CAPABILITIES };
+  // Codex Fast mode ids ("<id>-fast", "<id>-<effort>-fast") share the base model's capabilities.
+  const codexFast = provider === "codex" || provider === "cx" ? parseCodexFastModel(model.replace(/\([^()]+\)\s*$/, "")) : null;
+  if (codexFast) return getCapabilitiesForModel(provider, codexFast.model);
 
   // Canonical exact lookup strips vendor prefix: "anthropic/claude-opus-4.7" -> "claude-opus-4.7".
   const baseModel = model.includes("/") ? model.split("/").pop() : model;

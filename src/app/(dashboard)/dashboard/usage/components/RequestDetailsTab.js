@@ -131,36 +131,51 @@ export default function RequestDetailsTab() {
     }
   }, []);
 
-  const fetchDetails = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        page: pagination.page.toString(),
-        pageSize: pagination.pageSize.toString()
-      });
-      if (filters.provider) params.append("provider", filters.provider);
-      if (filters.startDate) params.append("startDate", filters.startDate);
-      if (filters.endDate) params.append("endDate", filters.endDate);
+  useEffect(() => {
+    const controller = new AbortController();
+    let refreshTimer;
 
-      const res = await fetch(`/api/usage/request-details?${params}`);
-      const data = await res.json();
+    const fetchDetails = async (showLoading = false) => {
+      if (showLoading) setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          page: pagination.page.toString(),
+          pageSize: pagination.pageSize.toString()
+        });
+        if (filters.provider) params.append("provider", filters.provider);
+        if (filters.startDate) params.append("startDate", filters.startDate);
+        if (filters.endDate) params.append("endDate", filters.endDate);
 
-      setDetails(data.details || []);
-      setPagination(prev => ({ ...prev, ...data.pagination }));
-    } catch (error) {
-      console.error("Failed to fetch request details:", error);
-    } finally {
-      setLoading(false);
-    }
+        const res = await fetch(`/api/usage/request-details?${params}`, {
+          signal: controller.signal,
+          cache: "no-store"
+        });
+        if (!res.ok) throw new Error(`Failed to fetch request details: ${res.status}`);
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+
+        setDetails(data.details || []);
+        setPagination(prev => ({ ...prev, ...data.pagination }));
+      } catch (error) {
+        if (!controller.signal.aborted) console.error("Failed to fetch request details:", error);
+      } finally {
+        if (!controller.signal.aborted) {
+          if (showLoading) setLoading(false);
+          refreshTimer = setTimeout(fetchDetails, 3000);
+        }
+      }
+    };
+
+    fetchDetails(true);
+    return () => {
+      controller.abort();
+      clearTimeout(refreshTimer);
+    };
   }, [pagination.page, pagination.pageSize, filters]);
 
   useEffect(() => {
     fetchProviders();
   }, [fetchProviders]);
-
-  useEffect(() => {
-    fetchDetails();
-  }, [fetchDetails]);
 
   const handleViewDetail = (detail) => {
     setSelectedDetail(detail);

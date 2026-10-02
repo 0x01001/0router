@@ -1,8 +1,22 @@
 import PropTypes from "prop-types";
 import { CapacityBadges } from "@/shared/components";
+import { LEVEL_TO_BUDGET } from "open-sse/translator/concerns/thinking.js";
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, caps, thinkingSuffix }) {
-  const displayModel = thinkingSuffix ? `${fullModel}(${thinkingSuffix})` : fullModel;
+const FAST_LEVELS = [...Object.keys(LEVEL_TO_BUDGET), "ultra"].join("|");
+const FAST_PAREN_LEVEL = new RegExp(`^(.*)\\((${FAST_LEVELS})\\)$`);
+const FAST_DASH_LEVEL = new RegExp(`-(${FAST_LEVELS})$`);
+
+export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, onDisable, caps, thinkingSuffix, fast }) {
+  let displayModel = thinkingSuffix ? `${fullModel}(${thinkingSuffix})` : fullModel;
+  if (fast) {
+    // Replace an existing effort rather than stacking suffixes on custom model ids.
+    let base = fullModel.replace(/-fast$/, "");
+    const paren = base.match(FAST_PAREN_LEVEL);
+    if (paren) base = paren[1];
+    else if (thinkingSuffix) base = base.replace(FAST_DASH_LEVEL, "");
+    const level = thinkingSuffix || paren?.[2];
+    displayModel = `${base}${level ? `-${level}` : ""}-fast`;
+  }
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -34,7 +48,7 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
         {onTest && (
           <div className="relative shrink-0 group/btn">
             <button
-              onClick={onTest}
+              onClick={() => onTest(displayModel)}
               disabled={isTesting}
               className={`rounded p-0.5 text-text-muted transition-opacity hover:bg-sidebar hover:text-primary ${isTesting ? "opacity-100" : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100"}`}
             >
@@ -99,4 +113,5 @@ ModelRow.propTypes = {
   onDisable: PropTypes.func,
   caps: PropTypes.object,
   thinkingSuffix: PropTypes.string,
+  fast: PropTypes.bool,
 };

@@ -1,7 +1,19 @@
 import { FORMATS } from "../../translator/formats.js";
+import { LEVEL_TO_BUDGET } from "../../translator/concerns/thinking.js";
 
 // Codex auto-generates a "-review" variant for each llm model (review quota family)
 export const CODEX_REVIEW_SUFFIX = "-review";
+
+// Codex Fast mode: "<id>-fast" / "<id>-<effort>-fast" → { model, effort } (priority tier).
+// Expects an id without a "(level)" thinking suffix. null when the id has no fast tail.
+export const CODEX_FAST_SUFFIX = "-fast";
+const CODEX_FAST_EFFORTS = [...Object.keys(LEVEL_TO_BUDGET), "ultra"];
+export function parseCodexFastModel(modelId) {
+  if (typeof modelId !== "string" || !modelId.endsWith(CODEX_FAST_SUFFIX)) return null;
+  const model = modelId.slice(0, -CODEX_FAST_SUFFIX.length);
+  const effort = CODEX_FAST_EFFORTS.find((level) => model.endsWith(`-${level}`)) || null;
+  return { model: effort ? model.slice(0, -(effort.length + 1)) : model, effort };
+}
 
 export function withCodexReviewModels(models) {
   return models.flatMap((model) => {

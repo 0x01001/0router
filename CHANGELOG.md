@@ -1,3 +1,12 @@
+# Unreleased
+
+## Fixes
+- **Usage & Analytics**: refresh the Details tab in the background every 3 seconds after each fetch, retaining filters and pagination without hiding rows. Cancel obsolete requests on filter/page changes or tab exit so stale responses cannot overwrite current data. New Details records require **Enable Observability** on `/dashboard/profile`; Overview statistics continue updating when capture is disabled. Existing capture settings and buffered writes are unchanged, and requests not captured while disabled cannot be recovered.
+- **Usage Details**: restore stored client/provider request and response content for authenticated dashboard administrators. Anonymous access (including login-disabled dashboards) and CLI-token-only access remain redacted; responses are private and non-cacheable. The dashboard has no separate role system: all authenticated dashboard sessions have administrative access. Existing capture/truncation limits still apply.
+
+## Features
+- **Codex Fast mode**: enable Fast beside Thinking in Dashboard → Providers → OpenAI Codex → Available Models, then copy a model such as `cx/gpt-5.6-sol-high-fast`. The browser remembers this selection; existing clients/model names are not globally switched. `-fast` requests use the priority service tier, with optional reasoning effort, while preserving review routing and Responses Lite support. Fast availability and increased quota/cost depend on the upstream model and account.
+
 # v0.5.91 (2026-09-26)
 
 ## Features

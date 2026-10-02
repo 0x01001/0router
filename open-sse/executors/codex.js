@@ -7,7 +7,7 @@ import {
 } from "../services/oauthCredentialManager.js";
 import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
-import { getModelUpstreamId, getProviderModels } from "../config/providerModels.js";
+import { getCodexFastModel, getModelUpstreamId, getProviderModels } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
@@ -26,7 +26,8 @@ const CODEX_SSE_USER_OUTPUT_PATTERNS = [
 const CODEX_SSE_PEEK_BYTES = 256 * 1024;
 const CODEX_MODEL_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.";
 function isCodexResponsesLiteModel(model) {
-  const baseId = String(model || "").replace(/\([^()]+\)\s*$/, "");
+  const id = String(model || "").replace(/\([^()]+\)\s*$/, "");
+  const baseId = getCodexFastModel(id)?.model || id;
   return getProviderModels("cx").some((entry) => entry.id === baseId && entry.responsesLite === true);
 }
 
@@ -450,6 +451,9 @@ export class CodexExecutor extends BaseExecutor {
 
     // Map virtual Codex review models to the upstream Codex model before suffix parsing.
     body.model = upstreamModel;
+    // Fast mode tail ("-fast" / "-<effort>-fast") → base model + priority tier.
+    const fast = getCodexFastModel(body.model);
+    if (fast) body.model = fast.model;
 
     if (responsesLite) {
       // Codex 0.155 carries tools and instructions as input prefix items.
@@ -476,8 +480,8 @@ export class CodexExecutor extends BaseExecutor {
     // Extract thinking level from model name suffix
     // e.g., gpt-5.3-codex-high → high, gpt-5.3-codex → medium (default)
     const effortLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-    let modelEffort = null;
-    for (const level of effortLevels) {
+    let modelEffort = fast?.effort || null;
+    for (const level of fast ? [] : effortLevels) {
       if (body.model.endsWith(`-${level}`)) {
         modelEffort = level;
         // Strip suffix from model name for actual API call
@@ -522,6 +526,7 @@ export class CodexExecutor extends BaseExecutor {
     delete body.previous_response_id; // store=false → backend can't resolve previous resp; avoid 404
 
     if (body.service_tier === "fast") body.service_tier = "priority";
+    if (fast) body.service_tier = "priority"; // explicit model opt-in wins over body tier
     if (body.service_tier && body.service_tier !== "priority") delete body.service_tier;
 
     // Final allowlist filter — strip any unknown field that could trigger upstream "routing_unsupported"

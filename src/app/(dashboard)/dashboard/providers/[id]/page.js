@@ -68,6 +68,8 @@ export default function ProviderDetailPage() {
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
+  // Codex Fast mode: UI-only (copied model name gets `-fast`); persisted in localStorage, not server settings.
+  const [codexFast, setCodexFast] = useState(false);
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [liveModels, setLiveModels] = useState([]);
@@ -88,6 +90,17 @@ export default function ProviderDetailPage() {
   const { copied, copy } = useCopyToClipboard();
 
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
+  const CODEX_FAST_STORAGE_KEY = "codex_fast_mode";
+  const isCodexFast = providerId === "codex" && codexFast;
+
+  useEffect(() => {
+    if (providerId === "codex") setCodexFast(window.localStorage.getItem(CODEX_FAST_STORAGE_KEY) === "true");
+  }, [providerId]);
+
+  const handleCodexFastChange = (enabled) => {
+    setCodexFast(enabled);
+    window.localStorage.setItem(CODEX_FAST_STORAGE_KEY, String(enabled));
+  };
 
   const openOAuthConnection = () => {
     setShowOAuthModal(true);
@@ -1127,14 +1140,15 @@ export default function ProviderDetailPage() {
     </Modal>
   );
 
-  const handleTestModel = async (modelId) => {
+  // testModel: optional full model string override (Codex Fast tests the displayed `-fast` variant); status stays keyed by base modelId.
+  const handleTestModel = async (modelId, testModel) => {
     if (testingModelIds.has(modelId)) return;
     setTestingModelIds((prev) => new Set(prev).add(modelId));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `${providerStorageAlias}/${modelId}` }),
+        body: JSON.stringify({ model: testModel || `${providerStorageAlias}/${modelId}` }),
       });
       const data = await res.json();
       setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
@@ -1203,12 +1217,13 @@ export default function ProviderDetailPage() {
               }
             }}
             testStatus={modelTestResults[model.id]}
-            onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+            onTest={connections.length > 0 || isFreeNoAuth ? (shown) => handleTestModel(model.id, isCodexFast ? shown : undefined) : undefined}
             isTesting={testingModelIds.has(model.id)}
             isCustom
             isFree={false}
             caps={getCaps(`${providerId}/${model.id}`)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
+            fast={isCodexFast}
           />
         ))}
 
@@ -1229,12 +1244,13 @@ export default function ProviderDetailPage() {
               onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
               onDeleteAlias={() => handleDeleteAlias(existingAlias)}
               testStatus={modelTestResults[model.id]}
-              onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+              onTest={connections.length > 0 || isFreeNoAuth ? (shown) => handleTestModel(model.id, isCodexFast ? shown : undefined) : undefined}
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
+              fast={isCodexFast}
             />
           );
         })}
@@ -1746,7 +1762,7 @@ export default function ProviderDetailPage() {
       {/* Models */}
       <Card>
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h2 className="text-lg font-semibold">
               {"Available Models"}
             </h2>
@@ -1761,6 +1777,24 @@ export default function ProviderDetailPage() {
                   <option key={opt} value={opt}>{`Thinking: ${opt.charAt(0).toUpperCase() + opt.slice(1)}`}</option>
                 ))}
               </select>
+            )}
+            {providerId === "codex" && (
+              <label
+                className="flex cursor-pointer items-center gap-1.5 text-xs text-text-muted"
+                title="Appends -fast to copied model names. Fast uses the priority service tier: higher cost and faster quota usage."
+              >
+                <input
+                  type="checkbox"
+                  checked={codexFast}
+                  onChange={(e) => handleCodexFastChange(e.target.checked)}
+                  aria-describedby="codex-fast-warning"
+                  className="accent-primary"
+                />
+                Fast
+                <span id="codex-fast-warning" className="text-[10px] text-amber-600 dark:text-amber-400">
+                  (priority tier: more cost/quota)
+                </span>
+              </label>
             )}
           </div>
           {!isCompatible && (() => {
