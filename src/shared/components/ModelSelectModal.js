@@ -374,8 +374,11 @@ export default function ModelSelectModal({
 
         // Custom models registered via /api/models/custom (provider "Add Model" button)
         const customAliasIds = new Set(customAliasModels.map((m) => m.id));
+        // Dedupe only against hardcoded models this selector actually shows: an LLM custom
+        // row reusing a built-in embedding id (filtered out below) must stay pickable.
+        const visibleHardcodedIds = new Set(filterByKind(hardcodedModels).map((m) => m.id));
         const customRegisteredModels = customModels
-          .filter((m) => m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
+          .filter((m) => m.providerAlias === alias && !visibleHardcodedIds.has(m.id) && !customAliasIds.has(m.id))
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [

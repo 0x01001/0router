@@ -1149,7 +1149,12 @@ export default function ProviderDetailPage() {
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: testModel || `${providerStorageAlias}/${modelId}` }),
+        // Built-in non-chat models (embedding/tts/...) must be pinged on their own endpoint —
+        // a chat ping 404s for them even when the id is right.
+        body: JSON.stringify({
+          model: testModel || `${providerStorageAlias}/${modelId}`,
+          kind: getModelKind(models.find((m) => m.id === modelId), "llm"),
+        }),
       });
       const data = await res.json();
       setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
