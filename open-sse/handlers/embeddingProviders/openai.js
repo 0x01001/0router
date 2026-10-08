@@ -17,12 +17,16 @@ export default function createOpenAIEmbeddingAdapter(providerId) {
     buildHeaders: (creds) => {
       return { "Content-Type": "application/json", ...bearerAuth(creds), ...(cfg.headers || {}) };
     },
-    buildBody: (model, { input, encoding_format, dimensions }) => {
+    buildBody: (model, { input, encoding_format, dimensions, extra }) => {
       const body = { model, input };
       if (encoding_format) body.encoding_format = encoding_format;
       if (dimensions != null && dimensions !== "") {
         const dim = Number(dimensions);
         if (Number.isFinite(dim) && dim > 0) body.dimensions = dim;
+      }
+      // Provider-declared extras only (registry embeddingConfig.passthroughParams)
+      for (const key of cfg.passthroughParams || []) {
+        if (typeof extra?.[key] === "string" && extra[key]) body[key] = extra[key];
       }
       return body;
     },

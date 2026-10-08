@@ -37,6 +37,10 @@ import { DEFAULT_RETRY_CONFIG, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtim
  *   searchViaChat:{defaultModel,pricingUrl}, hiddenKinds } — each *Config: {baseUrl,authType,authHeader,
  *   format,defaultModel,models:[{id,name,dimensions?}]}.
  *
+ * embeddingConfig.passthroughParams (optional): extra client body fields forwarded verbatim
+ *   to an OpenAI-compatible embeddings upstream (e.g. NVIDIA `input_type`, `truncate`). Only
+ *   listed, string-valued fields are sent — providers that reject unknown params never see them.
+ *
  * imageConfig.modelMap (optional): maps a client-facing model id to a provider-resolved id when
  *   those differ — e.g. the HuggingFace Inference Providers router, where a Hub id like
  *   `black-forest-labs/FLUX.1-schnell` is addressed as `fal-ai/fal-ai/flux/schnell`. A value is

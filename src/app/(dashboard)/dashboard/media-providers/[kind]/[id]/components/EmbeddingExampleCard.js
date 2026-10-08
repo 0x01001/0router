@@ -21,9 +21,19 @@ const DEFAULT_RESPONSE_EXAMPLE = `{
 export function EmbeddingExampleCard({ providerId, customAlias }) {
   const isCustom = isCustomEmbeddingProvider(providerId);
   const providerAlias = isCustom ? (customAlias || providerId) : getProviderAlias(providerId);
-  const embeddingModels = isCustom ? [] : getModelsByProviderId(providerId).filter((m) => getModelKind(m) === "embedding");
+  const builtInModels = isCustom ? [] : getModelsByProviderId(providerId).filter((m) => getModelKind(m) === "embedding");
+  const [customModels, setCustomModels] = useState([]);
+  // Built-in + user-added (ModelsCard "Add custom model") embedding models, deduped by id
+  const embeddingModels = [
+    ...builtInModels,
+    ...customModels.filter(
+      (m) => m.providerAlias === providerAlias
+        && getModelKind(m, "llm") === "embedding"
+        && !builtInModels.some((b) => b.id === m.id)
+    ),
+  ];
 
-  const [selectedModel, setSelectedModel] = useState(embeddingModels[0]?.id ?? "");
+  const [selectedModel, setSelectedModel] = useState(builtInModels[0]?.id ?? "");
   const [input, setInput] = useState("The quick brown fox jumps over the lazy dog");
   const [dimensions, setDimensions] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -48,8 +58,25 @@ export function EmbeddingExampleCard({ providerId, customAlias }) {
       .catch(() => {});
   }, []);
 
+  // Custom models — refetch when ModelsCard adds/removes one
+  useEffect(() => {
+    if (isCustom) return;
+    const load = () => fetch("/api/models/custom", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setCustomModels(d.models || []))
+      .catch(() => {});
+    load();
+    window.addEventListener("customModelChanged", load);
+    return () => window.removeEventListener("customModelChanged", load);
+  }, [isCustom]);
+
+  // Fall back to the first model when the selection is gone (e.g. selected custom model deleted)
+  const activeModel = isCustom || embeddingModels.some((m) => m.id === selectedModel)
+    ? selectedModel
+    : (embeddingModels[0]?.id ?? "");
+
   const endpoint = useTunnel ? tunnelEndpoint : localEndpoint;
-  const modelFull = selectedModel ? `${providerAlias}/${selectedModel}` : "";
+  const modelFull = activeModel ? `${providerAlias}/${activeModel}` : "";
 
   // Build request body — include dimensions only if user provided a positive number
   const buildBody = () => {
@@ -119,7 +146,7 @@ export function EmbeddingExampleCard({ providerId, customAlias }) {
             />
           ) : (
             <select
-              value={selectedModel}
+              value={activeModel}
               onChange={(e) => setSelectedModel(e.target.value)}
               className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
             >

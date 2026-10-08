@@ -67,8 +67,11 @@ ModelRow.propTypes = {
 };
 
 // ── AddCustomModelModal ────────────────────────────────────────
-function AddCustomModelModal({ isOpen, onSave, onClose }) {
+function AddCustomModelModal({ isOpen, providerAlias, onSave, onClose }) {
   const [modelId, setModelId] = useState("");
+  const trimmedId = modelId.trim();
+  // Pasting the full request string ("nvidia/nvidia/x") doubles the 9Router prefix → upstream 404
+  const doubledPrefix = !!providerAlias && trimmedId.startsWith(`${providerAlias}/${providerAlias}/`);
 
   const handleSave = () => {
     if (!modelId.trim()) return;
@@ -89,6 +92,17 @@ function AddCustomModelModal({ isOpen, onSave, onClose }) {
             placeholder="e.g. tts-1-hd"
             autoFocus
           />
+          {trimmedId && providerAlias && (
+            <div className="mt-1.5 flex flex-col gap-0.5 text-[11px] text-text-muted">
+              <span>Request model: <code className="font-mono">{providerAlias}/{trimmedId}</code></span>
+              <span>Sent upstream as: <code className="font-mono">{trimmedId}</code></span>
+            </div>
+          )}
+          {doubledPrefix && (
+            <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+              Enter the provider&apos;s own model ID — without the <code className="font-mono">{providerAlias}/</code> routing prefix.
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
           <Button onClick={handleSave} fullWidth disabled={!modelId.trim()}>Add</Button>
@@ -101,6 +115,7 @@ function AddCustomModelModal({ isOpen, onSave, onClose }) {
 
 AddCustomModelModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
+  providerAlias: PropTypes.string,
   onSave: PropTypes.func.isRequired,
   onClose: PropTypes.func.isRequired,
 };
@@ -273,6 +288,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
 
       <AddCustomModelModal
         isOpen={showAddCustomModel}
+        providerAlias={providerAlias}
         onSave={async (modelId) => {
           await handleAddCustomModel(modelId);
           setShowAddCustomModel(false);
