@@ -386,13 +386,15 @@ export default function ModelSelectModal({
           ...customAliasModels,
           ...customRegisteredModels,
         ];
-        // Dedupe by value (alias may equal hardcoded id, causing React key collision)
+        // Dedupe by value (alias may equal hardcoded id, causing React key collision).
+        // Kind-filter first: a hidden hardcoded embedding must not win the dedupe over a
+        // pickable custom LLM row with the same value and then vanish with it.
         const seen = new Set();
-        let allModels = filterByKind(merged.filter((m) => {
+        let allModels = filterByKind(merged).filter((m) => {
           if (seen.has(m.value)) return false;
           seen.add(m.value);
           return true;
-        }));
+        });
 
         // Provider-as-model fallback: providers that support the kind but have no hardcoded models
         // can still be picked (value = providerAlias). Skips embedding (always needs model).
