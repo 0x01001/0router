@@ -10,10 +10,17 @@ else
   RELEASE_SCRIPT := scripts/release-local.sh
 endif
 
+# Unix-style $(HOME) defaults only apply on macOS/Linux. On Windows $(HOME) is
+# usually empty under make, so these would become root-relative paths like
+# "/.9router" that Node resolves against the CURRENT DRIVE (e.g. D:\.9router)
+# and leak into every child process via `export`. The PowerShell scripts
+# resolve their own Windows defaults (%APPDATA%\9router, npm root -g, node).
+ifneq ($(OS),Windows_NT)
 INSTALL_DIR ?= $(HOME)/.local/lib/node_modules/9router
 DATA_DIR ?= $(HOME)/.9router
-PORT ?= 20128
 NODE_BIN ?= $(HOME)/.hermes/node/bin/node
+endif
+PORT ?= 20128
 RUN_TESTS ?= 1
 AUTO_INSTALL_DEPS ?= 1
 REQUIRE_CURSOR_CONTENT ?= 0
@@ -21,7 +28,17 @@ PRESERVE_PREVIOUS_STATIC ?= 1
 STOP_TIMEOUT ?= 20
 HEALTH_TIMEOUT ?= 45
 
-export INSTALL_DIR DATA_DIR PORT NODE_BIN RUN_TESTS AUTO_INSTALL_DEPS REQUIRE_CURSOR_CONTENT PRESERVE_PREVIOUS_STATIC STOP_TIMEOUT HEALTH_TIMEOUT
+export PORT RUN_TESTS AUTO_INSTALL_DEPS REQUIRE_CURSOR_CONTENT PRESERVE_PREVIOUS_STATIC STOP_TIMEOUT HEALTH_TIMEOUT
+# Only export path vars that actually have a value (never an empty/derived-empty path).
+ifneq ($(strip $(INSTALL_DIR)),)
+export INSTALL_DIR
+endif
+ifneq ($(strip $(DATA_DIR)),)
+export DATA_DIR
+endif
+ifneq ($(strip $(NODE_BIN)),)
+export NODE_BIN
+endif
 
 .PHONY: help install build deploy release release-strict release-no-test release-dry-run release-check deploy-dry-run
 

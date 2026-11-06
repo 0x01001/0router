@@ -1,6 +1,6 @@
 import { BaseExecutor } from "./base.js";
 import { PROVIDERS, PROVIDER_OAUTH } from "../config/providers.js";
-import { HTTP_STATUS } from "../config/runtimeConfig.js";
+import { HTTP_STATUS, ERROR_TYPES } from "../config/runtimeConfig.js";
 import {
   generateCursorBody,
   encodeField,
@@ -173,7 +173,83 @@ function extractAgentString(message, field) {
   return value ? Buffer.from(value).toString("utf8") : "";
 }
 
-function decodeAgentFrames(buffer, onFrame) {
+// Connect-protocol error codes → HTTP status (https://connectrpc.com/docs/protocol#error-codes).
+const CONNECT_ERROR_STATUS = Object.freeze({
+  canceled: 499,
+  unknown: HTTP_STATUS.SERVER_ERROR,
+  invalid_argument: HTTP_STATUS.BAD_REQUEST,
+  deadline_exceeded: HTTP_STATUS.GATEWAY_TIMEOUT,
+  not_found: HTTP_STATUS.NOT_FOUND,
+  already_exists: 409,
+  permission_denied: HTTP_STATUS.FORBIDDEN,
+  resource_exhausted: HTTP_STATUS.RATE_LIMITED,
+  failed_precondition: HTTP_STATUS.BAD_REQUEST,
+  aborted: 409,
+  out_of_range: HTTP_STATUS.BAD_REQUEST,
+  unimplemented: 501,
+  internal: HTTP_STATUS.SERVER_ERROR,
+  unavailable: HTTP_STATUS.SERVICE_UNAVAILABLE,
+  data_loss: HTTP_STATUS.SERVER_ERROR,
+  unauthenticated: HTTP_STATUS.UNAUTHORIZED,
+});
+
+// Cursor reports billing walls as resource_exhausted; these markers in the
+// aiserver.v1.ErrorDetails debug payload distinguish "buy credits" from a
+// transient rate limit so the account gets a 402 cooldown instead of backoff.
+const CURSOR_BILLING_ERROR_CODES = new Set([
+  "ERROR_USAGE_PRICING_REQUIRED",
+  "ERROR_FREE_USER_USAGE_LIMIT",
+  "ERROR_PRO_USER_USAGE_LIMIT",
+]);
+
+/**
+ * Parse the Connect end-of-stream trailer. AgentService answers HTTP 200 and
+ * only reports failures (quota, billing, auth) in this JSON trailer frame.
+ * @param {Uint8Array|Buffer} payload
+ * @returns {{ status: number, code: string, upstreamCode: string|null, message: string } | null}
+ */
+export function parseConnectTrailerError(payload) {
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.from(payload || []).toString("utf8"));
+  } catch {
+    return null;
+  }
+  const error = parsed?.error;
+  if (!error || typeof error !== "object") return null;
+
+  const code = String(error.code || "unknown").toLowerCase();
+  const debug = (Array.isArray(error.details) ? error.details : [])
+    .map((detail) => detail?.debug)
+    .find((entry) => entry && typeof entry === "object") || null;
+  const upstreamCode = typeof debug?.error === "string" ? debug.error : null;
+  const info = debug?.details && typeof debug.details === "object" ? debug.details : {};
+  const additional = info.additionalInfo && typeof info.additionalInfo === "object" ? info.additionalInfo : {};
+  const isBilling = (upstreamCode && CURSOR_BILLING_ERROR_CODES.has(upstreamCode))
+    || info.analyticsMetadata?.actionRequired === "payment"
+    || /prepaid_balance_exhausted/i.test(String(additional.rateLimitReason || ""));
+
+  const status = isBilling
+    ? HTTP_STATUS.PAYMENT_REQUIRED
+    : (CONNECT_ERROR_STATUS[code] || HTTP_STATUS.BAD_GATEWAY);
+
+  const title = typeof info.title === "string" ? info.title.trim() : "";
+  const detail = typeof info.detail === "string" ? info.detail.trim() : "";
+  const buttons = Array.isArray(info.buttons) ? info.buttons : [];
+  const link = buttons.find((button) => typeof button?.url?.url === "string")?.url?.url || null;
+  const human = [title, detail]
+    .map((part) => part.replace(/[.\s]+$/, ""))
+    .filter(Boolean)
+    .join(". ");
+  const base = human
+    || (typeof error.message === "string" && error.message !== "Error" ? error.message : "")
+    || `AgentService ${code}`;
+  const message = `Cursor ${upstreamCode ? `${upstreamCode}: ` : ""}${base}${link ? ` (${link})` : ""}`;
+
+  return { status, code, upstreamCode, message };
+}
+
+function decodeAgentFrames(buffer, onFrame, onTrailer) {
   let pending = Buffer.from(buffer || []);
   while (pending.length >= 5) {
     const flags = pending[0];
@@ -184,9 +260,24 @@ function decodeAgentFrames(buffer, onFrame) {
     if (flags & COMPRESS_FLAG.GZIP) {
       payload = zlib.gunzipSync(payload);
     }
-    if (!(flags & COMPRESS_FLAG.TRAILER)) onFrame(payload);
+    if (flags & COMPRESS_FLAG.TRAILER) onTrailer?.(payload);
+    else onFrame(payload);
   }
   return pending;
+}
+
+function agentErrorResponse(agentError, status, url, headers, body) {
+  const errorType = ERROR_TYPES[status]?.type || "api_error";
+  const errorCode = ERROR_TYPES[status]?.code;
+  return {
+    response: new Response(JSON.stringify({
+      error: { message: agentError, type: errorType, ...(errorCode ? { code: errorCode } : {}) },
+    }), { status, headers: { "Content-Type": "application/json" } }),
+    url,
+    headers,
+    transformedBody: body,
+    responseFormat: FORMATS.OPENAI,
+  };
 }
 
 function execIds(execRequest) {
@@ -615,6 +706,14 @@ export class CursorExecutor extends BaseExecutor {
           const { done, value } = await session.read();
           if (done) break;
           pending = Buffer.concat([pending, Buffer.from(value)]);
+          const onTrailer = (payload) => {
+            if (finished) return;
+            const trailerError = parseConnectTrailerError(payload);
+            if (!trailerError) return;
+            log?.warn?.("CURSOR", `AgentService error ${trailerError.status}: ${trailerError.message}`);
+            finished = true;
+            onEvent({ type: "error", value: trailerError.message, status: trailerError.status });
+          };
           pending = decodeAgentFrames(pending, (payload) => {
             // A single read can carry several frames; once the turn is over the
             // rest of the batch must not reach the already-closed controller.
@@ -709,7 +808,7 @@ export class CursorExecutor extends BaseExecutor {
                 }
               }
             }
-          });
+          }, onTrailer);
         }
       } finally {
         try { session.end(); } catch {}
@@ -725,6 +824,7 @@ export class CursorExecutor extends BaseExecutor {
       let content = "";
       let reasoning = "";
       let agentError = null;
+      let agentStatus = HTTP_STATUS.BAD_REQUEST;
       const toolCalls = [];
       let finishReason = "stop";
       await consume((event) => {
@@ -738,20 +838,14 @@ export class CursorExecutor extends BaseExecutor {
           });
           finishReason = "tool_calls";
         }
-        else if (event.type === "error") agentError = event.value;
+        else if (event.type === "error") {
+          agentError = event.value;
+          if (event.status) agentStatus = event.status;
+        }
         else if (event.type === "done" && event.finishReason) finishReason = event.finishReason;
       });
       if (agentError) {
-        return {
-          response: new Response(JSON.stringify({ error: { message: agentError, type: "api_error" } }), {
-            status: HTTP_STATUS.BAD_REQUEST,
-            headers: { "Content-Type": "application/json" },
-          }),
-          url,
-          headers,
-          transformedBody: body,
-          responseFormat: FORMATS.OPENAI,
-        };
+        return agentErrorResponse(agentError, agentStatus, url, headers, body);
       }
       const message = {
         role: "assistant",
@@ -775,10 +869,45 @@ export class CursorExecutor extends BaseExecutor {
       };
     }
 
+    const queue = [];
+    let wake = null;
+    let consumeDone = false;
+    let consumeFailure = null;
+    const notify = () => {
+      if (!wake) return;
+      const resolve = wake;
+      wake = null;
+      resolve();
+    };
+    const consuming = consume((event) => {
+      queue.push(event);
+      notify();
+    });
+    consuming
+      .catch((error) => { consumeFailure = error; })
+      .finally(() => { consumeDone = true; notify(); });
+    const nextEvent = async () => {
+      while (!queue.length) {
+        if (consumeDone) return null;
+        await new Promise((resolve) => { wake = resolve; });
+      }
+      return queue.shift();
+    };
+
+    const firstEvent = await nextEvent();
+    if (!firstEvent && consumeFailure) throw consumeFailure;
+    if (firstEvent?.type === "error" && firstEvent.status) {
+      // Nothing was streamed yet: surface the upstream failure (billing, quota,
+      // auth) as a real HTTP error instead of an empty 200 SSE body.
+      return agentErrorResponse(firstEvent.value, firstEvent.status, url, headers, body);
+    }
+
     const encoder = new TextEncoder();
     const responseStream = new ReadableStream({
       start(controller) {
-        consume((event) => {
+        let closed = false;
+        const handle = (event) => {
+          if (closed) return;
           if (event.type === "text") {
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { content: event.value } })));
           } else if (event.type === "thinking") {
@@ -799,8 +928,10 @@ export class CursorExecutor extends BaseExecutor {
             // An SSE error frame, not a content delta: a protocol failure must not
             // be rendered to the user as the assistant's reply, and downstream
             // usage tracking must not record the turn as a success.
-            controller.enqueue(encoder.encode(sseChunk({ error: { message: event.value, type: "api_error" } })));
+            const errorType = (event.status && ERROR_TYPES[event.status]?.type) || "api_error";
+            controller.enqueue(encoder.encode(sseChunk({ error: { message: event.value, type: errorType } })));
             controller.enqueue(encoder.encode(SSE_DONE));
+            closed = true;
             controller.close();
           } else if (event.type === "done") {
             controller.enqueue(encoder.encode(chatChunkSse({
@@ -808,9 +939,15 @@ export class CursorExecutor extends BaseExecutor {
               finishReason: event.finishReason || "stop",
             })));
             controller.enqueue(encoder.encode(SSE_DONE));
+            closed = true;
             controller.close();
           }
-        }).catch((error) => controller.error(error));
+        };
+        (async () => {
+          if (firstEvent) handle(firstEvent);
+          for (let event = await nextEvent(); event; event = await nextEvent()) handle(event);
+          if (!closed && consumeFailure) controller.error(consumeFailure);
+        })().catch((error) => { if (!closed) controller.error(error); });
       },
       cancel() {
         requestController.abort();

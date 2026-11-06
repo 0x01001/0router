@@ -18,7 +18,9 @@ const CLI_TOKEN_SALT = "9r-cli-auth";
 const APP_NAME = "9router";
 
 function getDataDir() {
-  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  const configured = process.env.DATA_DIR;
+  // Windows: skip drive-less root paths (/.9router → would become D:\.9router).
+  if (configured && !(process.platform === "win32" && /^[\\/](?![\\/])/.test(configured))) return configured;
   if (process.platform === "win32") {
     return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), APP_NAME);
   }
