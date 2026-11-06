@@ -51,6 +51,7 @@ export async function handleEmbeddingsCore({
       input,
       encoding_format: body.encoding_format || "float",
       dimensions: body.dimensions,
+      extra: body,
     });
   } catch (error) {
     log?.debug?.("EMBEDDINGS", `Request build failed: ${error.message}`);

@@ -265,6 +265,9 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(provider)));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
+  // Fallback without cooldown (e.g. 404 model not found): let the caller try the
+  // next account, but don't lock this one or flag it unavailable.
+  if (!(cooldownMs > 0)) return { shouldFallback: true, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);

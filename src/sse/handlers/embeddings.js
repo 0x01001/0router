@@ -6,8 +6,9 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
-import { getModelInfo } from "../services/model.js";
+import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleEmbeddingsCore } from "open-sse/handlers/embeddingsCore.js";
+import { handleComboChat } from "open-sse/services/combo.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
@@ -75,6 +76,33 @@ export async function handleEmbeddings(request) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: input");
   }
 
+  // Combo: try each member model with the same account/model fallback as chat.
+  // Fusion and capability auto-switch are chat-only, so embeddings always walk the list.
+  const comboModels = await getComboModels(modelStr);
+  if (comboModels) {
+    const strategy = settings.comboStrategies?.[modelStr]?.fallbackStrategy || settings.comboStrategy || "fallback";
+    const comboStrategy = strategy === "fusion" ? "fallback" : strategy;
+    log.info("EMBEDDINGS", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy})`);
+    return handleComboChat({
+      body,
+      models: comboModels,
+      handleSingleModel: (b, m) => handleSingleModelEmbeddings(b, m, url, apiKey),
+      log,
+      comboName: modelStr,
+      comboStrategy,
+      comboStickyLimit: settings.comboStickyRoundRobinLimit,
+      autoSwitch: false,
+    });
+  }
+
+  return handleSingleModelEmbeddings(body, modelStr, url, apiKey);
+}
+
+/**
+ * Embeddings for one provider/model string: resolve, then credential + fallback loop.
+ * @returns {Promise<Response>}
+ */
+async function handleSingleModelEmbeddings(body, modelStr, url, apiKey) {
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) {
     log.warn("EMBEDDINGS", "Invalid model format", { model: modelStr });

@@ -188,6 +188,69 @@ describe("buildEmbeddingsBody", () => {
   });
 });
 
+// ─── Test: provider passthroughParams (registry embeddingConfig) ─────────────
+
+describe("buildEmbeddingsBody — passthroughParams", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const nvidiaOptions = (body) => makeOptions({
+    body: { model: "nvidia/nvidia/nemotron-3-embed-1b", input: ["xin chào"], ...body },
+    modelInfo: { provider: "nvidia", model: "nvidia/nemotron-3-embed-1b" },
+    credentials: { apiKey: "nvapi-test" },
+  });
+
+  it("nvidia forwards input_type and truncate to the upstream body", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeProviderResponse(VALID_EMBEDDING_RESPONSE));
+
+    await handleEmbeddingsCore(nvidiaOptions({ input_type: "query", truncate: "END" }));
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const sent = JSON.parse(init.body);
+    expect(url).toBe("https://integrate.api.nvidia.com/v1/embeddings");
+    expect(sent.model).toBe("nvidia/nemotron-3-embed-1b");
+    expect(sent.input_type).toBe("query");
+    expect(sent.truncate).toBe("END");
+  });
+
+  it("nvidia omits the params when the client does not send them", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeProviderResponse(VALID_EMBEDDING_RESPONSE));
+
+    await handleEmbeddingsCore(nvidiaOptions({}));
+
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1].body);
+    expect(sent).not.toHaveProperty("input_type");
+    expect(sent).not.toHaveProperty("truncate");
+  });
+
+  it("nvidia drops non-string values and unlisted fields", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeProviderResponse(VALID_EMBEDDING_RESPONSE));
+
+    await handleEmbeddingsCore(nvidiaOptions({ input_type: { $gt: 1 }, truncate: 5, user: "u-1" }));
+
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1].body);
+    expect(sent).not.toHaveProperty("input_type");
+    expect(sent).not.toHaveProperty("truncate");
+    expect(sent).not.toHaveProperty("user");
+  });
+
+  it("openai never receives input_type / truncate (not declared for it)", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeProviderResponse(VALID_EMBEDDING_RESPONSE));
+
+    await handleEmbeddingsCore(makeOptions({
+      body: { model: "text-embedding-3-small", input: "hi", input_type: "query", truncate: "END" },
+    }));
+
+    const sent = JSON.parse(vi.mocked(fetch).mock.calls[0][1].body);
+    expect(sent).not.toHaveProperty("input_type");
+    expect(sent).not.toHaveProperty("truncate");
+  });
+});
+
 // ─── Test: buildEmbeddingsUrl ────────────────────────────────────────────────
 
 describe("buildEmbeddingsUrl", () => {

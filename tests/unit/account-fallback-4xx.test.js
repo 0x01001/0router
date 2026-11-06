@@ -24,6 +24,11 @@ describe("checkFallbackError — request-scoped vs account-scoped failures", () 
     }
   });
 
+  it("falls back on 404 model-not-found without cooling the account down", () => {
+    // A typo'd / EOL model id used to lock the account for 2 min.
+    expect(checkFallbackError(404, "404 page not found")).toEqual({ shouldFallback: true, cooldownMs: 0 });
+  });
+
   it("still honours rate-limit / quota wording on any 4xx", () => {
     expect(checkFallbackError(400, "rate limit reached").shouldFallback).toBe(true);
     expect(checkFallbackError(422, "quota exceeded").shouldFallback).toBe(true);

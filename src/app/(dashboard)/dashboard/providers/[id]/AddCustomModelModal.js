@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Button, Modal, Select, Toggle } from "@/shared/components";
-import { CAPACITY_META, STT_TRANSPORT_META, STT_TRANSPORTS } from "@/shared/constants/models";
+import { CAPACITY_META, STT_TRANSPORT_META, STT_TRANSPORTS, getProviderModels, getModelKind } from "@/shared/constants/models";
 
 const defaultCaps = () => Object.fromEntries(Object.keys(CAPACITY_META).map((key) => [key, false]));
 
@@ -21,11 +21,22 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
     if (isOpen) { setModelId(""); setCaps(defaultCaps()); setTransport(""); setTestStatus(null); setTestError(""); }
   }, [isOpen]);
 
-  // Strip provider's own alias prefix (e.g. "cc/model" -> "model" for cc provider)
+  const builtInModels = getProviderModels(providerAlias);
+  // Upstream ids that already carry the alias as namespace (nvidia: "nvidia/nemotron-...")
+  const aliasIsNamespace = builtInModels.some((m) => m.id.startsWith(`${providerAlias}/`));
+
+  // Strip provider's own alias prefix (e.g. "cc/model" -> "model" for cc provider).
+  // When the alias is also the upstream namespace, only a doubled prefix is a pasted
+  // routing prefix — "nvidia/x" is already the real id, "nvidia/nvidia/x" is not.
   const stripAlias = (id) => {
     const prefix = `${providerAlias}/`;
-    return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+    if (!id.startsWith(prefix)) return id;
+    const rest = id.slice(prefix.length);
+    return aliasIsNamespace && !rest.startsWith(prefix) ? id : rest;
   };
+
+  // Built-in non-chat model (embedding/tts/...) — ping it on its own endpoint, not chat (which 404s)
+  const nonChatMatch = builtInModels.find((m) => m.id === stripAlias(modelId.trim()) && getModelKind(m, "llm") !== "llm");
 
   const handleTest = async () => {
     const cleanId = stripAlias(modelId.trim());
@@ -36,7 +47,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `${providerAlias}/${cleanId}` }),
+        body: JSON.stringify({ model: `${providerAlias}/${cleanId}`, kind: nonChatMatch ? getModelKind(nonChatMatch) : "llm" }),
       });
       const data = await res.json();
       setTestStatus(data.ok ? "ok" : "error");
@@ -92,6 +103,11 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
           <p className="text-xs text-text-muted mt-1">
             Sent to provider as: <code className="font-mono bg-sidebar px-1 rounded">{stripAlias(modelId.trim()) || "model-id"}</code>
           </p>
+          {nonChatMatch && (
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+              Built-in {getModelKind(nonChatMatch)} model — already available under Media Providers. Test uses the {getModelKind(nonChatMatch)} endpoint.
+            </p>
+          )}
         </div>
 
         <div>

@@ -374,8 +374,11 @@ export default function ModelSelectModal({
 
         // Custom models registered via /api/models/custom (provider "Add Model" button)
         const customAliasIds = new Set(customAliasModels.map((m) => m.id));
+        // Dedupe only against hardcoded models this selector actually shows: an LLM custom
+        // row reusing a built-in embedding id (filtered out below) must stay pickable.
+        const visibleHardcodedIds = new Set(filterByKind(hardcodedModels).map((m) => m.id));
         const customRegisteredModels = customModels
-          .filter((m) => m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
+          .filter((m) => m.providerAlias === alias && !visibleHardcodedIds.has(m.id) && !customAliasIds.has(m.id))
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
@@ -383,13 +386,15 @@ export default function ModelSelectModal({
           ...customAliasModels,
           ...customRegisteredModels,
         ];
-        // Dedupe by value (alias may equal hardcoded id, causing React key collision)
+        // Dedupe by value (alias may equal hardcoded id, causing React key collision).
+        // Kind-filter first: a hidden hardcoded embedding must not win the dedupe over a
+        // pickable custom LLM row with the same value and then vanish with it.
         const seen = new Set();
-        let allModels = filterByKind(merged.filter((m) => {
+        let allModels = filterByKind(merged).filter((m) => {
           if (seen.has(m.value)) return false;
           seen.add(m.value);
           return true;
-        }));
+        });
 
         // Provider-as-model fallback: providers that support the kind but have no hardcoded models
         // can still be picked (value = providerAlias). Skips embedding (always needs model).

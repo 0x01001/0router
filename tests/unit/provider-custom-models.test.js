@@ -81,4 +81,21 @@ describe("provider custom model rows", () => {
       },
     ]);
   });
+
+  it("keeps an LLM custom row that reuses a built-in embedding id (combo use)", () => {
+    const rows = getProviderCustomModelRows({
+      customModels: [
+        { providerAlias: "nvidia", id: "nvidia/nemotron-3-embed-1b", type: "llm" },
+        { providerAlias: "nvidia", id: "z-ai/glm-5.2", type: "llm" },
+      ],
+      providerAlias: "nvidia",
+      builtInModels: [
+        { id: "nvidia/nemotron-3-embed-1b", kind: "embedding" },
+        { id: "z-ai/glm-5.2" },
+      ],
+      type: "llm",
+    });
+
+    expect(rows.map((r) => r.id)).toEqual(["nvidia/nemotron-3-embed-1b"]);
+  });
 });

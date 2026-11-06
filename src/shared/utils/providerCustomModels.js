@@ -10,7 +10,11 @@ export function getProviderCustomModelRows({
   type = "llm",
   includeLegacyAliases = true,
 }) {
-  const builtInIds = new Set(builtInModels.map((model) => model.id));
+  // Dedupe only against built-ins of the same type: an LLM custom row reusing a built-in
+  // embedding id (e.g. to put it in a combo) must not vanish behind a model this list hides.
+  const builtInIds = new Set(
+    builtInModels.filter((model) => !type || modelType(model) === type).map((model) => model.id)
+  );
   const seenFullModels = new Set();
   const rows = [];
 

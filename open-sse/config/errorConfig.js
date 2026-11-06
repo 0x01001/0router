@@ -72,7 +72,12 @@ export const ERROR_RULES = [
   { status: 401, cooldownMs: COOLDOWN.long },
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
-  { status: 404, cooldownMs: COOLDOWN.long },
+  // 404 = model/endpoint not found (typo'd model id, EOL model, bad baseUrl). It is
+  // request-scoped, not a credential problem: still try the next account / combo
+  // model (another plan may expose the model), but never lock this one — a single
+  // wrong model id used to lock the account for 2 min and answer every later
+  // request with a copy of that 404.
+  { status: 404, cooldownMs: 0 },
   { status: 429, backoff: true },
 ];
 
@@ -80,7 +85,7 @@ export const ERROR_RULES = [
 export const COOLDOWN_MS = {
   unauthorized: COOLDOWN.long,
   paymentRequired: COOLDOWN.long,
-  notFound: COOLDOWN.long,
+  notFound: 0,
   transient: TRANSIENT_COOLDOWN_MS,
   requestNotAllowed: COOLDOWN.short,
 };
