@@ -13,12 +13,12 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
-import codexProvider from "open-sse/providers/registry/codex.js";
+import { ensureCodexCliVersion } from "open-sse/services/codexCliVersion.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
 // Model discovery must identify as the same Codex CLI version as inference.
-const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${codexProvider.transport.cliVersion}`;
+const CODEX_MODELS_URL_BASE = "https://chatgpt.com/backend-api/codex/models";
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -197,7 +197,7 @@ const PROVIDER_MODELS_CONFIG = {
   codex: {
     customResolver: buildOAuthResolver({
       refreshFn: (conn) => refreshCodexToken(conn.refreshToken),
-      fetchFn: (token) => fetch(CODEX_MODELS_URL, {
+      fetchFn: async (token) => fetch(`${CODEX_MODELS_URL_BASE}?client_version=${await ensureCodexCliVersion()}`, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
