@@ -15,9 +15,11 @@ export function getDataDir() {
   const configured = process.env.DATA_DIR;
   if (!configured) return defaultDir();
 
-  // On Windows, ignore Unix-style absolute paths (e.g. /var/lib/...) that come
-  // from a Linux-targeted .env or Docker config — they are not valid here.
-  if (process.platform === "win32" && /^\//.test(configured)) {
+  // On Windows, ignore drive-less root paths (e.g. /var/lib/..., /.9router, \tmp)
+  // that come from a Linux-targeted .env, Docker config or `make` with empty
+  // $(HOME). Node would resolve them against the CURRENT drive (D:\.9router).
+  // UNC paths (\\server\share, //server/share) are still allowed.
+  if (process.platform === "win32" && /^[\\/](?![\\/])/.test(configured)) {
     console.warn(`[DATA_DIR] '${configured}' is a Unix path on Windows → fallback to default`);
     return defaultDir();
   }

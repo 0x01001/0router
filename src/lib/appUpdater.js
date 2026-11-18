@@ -12,7 +12,7 @@ function killMitmByPidFile() {
   try {
     const mitmPidFile = path.join(
       process.platform === "win32"
-        ? path.join(process.env.APPDATA || "", "9router")
+        ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router")
         : path.join(os.homedir(), ".9router"),
       "mitm",
       ".mitm.pid"
@@ -97,7 +97,9 @@ function collectAppPids() {
 
 // Copy updater.js into DATA_DIR so npm -g can overwrite node_modules safely
 function getDataDir() {
-  if (process.env.DATA_DIR) return process.env.DATA_DIR;
+  const configured = process.env.DATA_DIR;
+  // Windows: skip drive-less root paths (/.9router → would become D:\.9router).
+  if (configured && !(process.platform === "win32" && /^[\\/](?![\\/])/.test(configured))) return configured;
   if (process.platform === "win32") {
     return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router");
   }

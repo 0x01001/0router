@@ -14,6 +14,12 @@ function defaultDir() {
 function getDataDir() {
   const configured = process.env.DATA_DIR;
   if (!configured) return defaultDir();
+  // Windows: a drive-less root path (/.9router, /var/lib/9router) would resolve
+  // against the current drive (e.g. D:\.9router) — ignore it, like lib/dataDir.js.
+  if (process.platform === "win32" && /^[\\/](?![\\/])/.test(configured)) {
+    console.warn(`[DATA_DIR] '${configured}' is a Unix path on Windows → fallback to default`);
+    return defaultDir();
+  }
   try {
     fs.mkdirSync(configured, { recursive: true });
     return configured;

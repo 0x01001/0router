@@ -2,11 +2,11 @@
 import { randomUUID } from "node:crypto";
 import { nowSec } from "./_base.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { CODEX_CLI_VERSION } from "../../config/appConstants.js";
+import { ensureCodexCliVersion, getCodexCliVersion } from "../../services/codexCliVersion.js";
 
 const CODEX_RESPONSES_URL = PROVIDERS["codex"].baseUrl;
-const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLI_VERSION}`;
 const CODEX_ORIGINATOR = "codex_cli_rs";
+ensureCodexCliVersion(); // warm runtime version cache (fail-open)
 const CODEX_MODEL_SUFFIX = "-image";
 const CODEX_REF_DETAIL = "high";
 const CODEX_IMAGES_MAIN_MODEL = "gpt-5.5";
@@ -171,8 +171,8 @@ export default {
       "content-type": "application/json",
       "originator": CODEX_ORIGINATOR,
       "session_id": randomUUID(),
-      "user-agent": CODEX_USER_AGENT,
-      "version": CODEX_CLI_VERSION,
+      "user-agent": `codex_cli_rs/${getCodexCliVersion()}`,
+      "version": getCodexCliVersion(),
       "x-client-request-id": randomUUID(),
     };
   },

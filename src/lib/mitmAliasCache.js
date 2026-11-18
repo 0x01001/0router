@@ -5,7 +5,12 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const DATA_DIR = process.env.DATA_DIR
+// Ignore drive-less root paths on Windows (would land on the current drive, e.g. D:\.9router).
+const ENV_DATA_DIR = process.platform === "win32" && /^[\\/](?![\\/])/.test(process.env.DATA_DIR || "")
+  ? ""
+  : process.env.DATA_DIR;
+
+const DATA_DIR = ENV_DATA_DIR
   || (process.platform === "win32"
     ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router")
     : path.join(os.homedir(), ".9router"));

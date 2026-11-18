@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- **Cursor**: parse the Connect end-of-stream trailer from AgentService so billing/quota/auth failures (e.g. `ERROR_USAGE_PRICING_REQUIRED` "buy credits") surface as HTTP 402/429/401 with Cursor's message instead of an empty 200 completion with 0 tokens; account fallback and cooldown now trigger
+
 # v0.5.95 (2026-10-01)
 
 ## Features

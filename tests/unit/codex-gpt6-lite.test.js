@@ -8,7 +8,7 @@ import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
 import * as proxyFetchModule from "../../open-sse/utils/proxyFetch.js";
 
 const credentials = { connectionId: "fixture", accessToken: "fixture-token" };
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 describe("Codex GPT-6 Sol/Luna transport", () => {
   it.each(["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"])("lists %s with Codex capabilities", (model) => {
@@ -187,6 +187,7 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     const fetchMock = vi.spyOn(proxyFetchModule, "proxyAwareFetch").mockResolvedValue({
       ok: true, status: 200, headers: new Map(),
     });
+    vi.stubEnv("CODEX_CLI_VERSION", "9.9.9"); // pin: skip local/npm detection
     await new CodexExecutor().execute({
       model: "gpt-6-luna",
       body: { model: "gpt-6-luna", input: "hello", instructions: "Do the task" },
@@ -198,8 +199,8 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     const body = JSON.parse(options.body);
     expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(options.headers["x-openai-internal-codex-responses-lite"]).toBe("true");
-    expect(options.headers.version).toBe("0.159.0");
-    expect(options.headers["User-Agent"]).toBe("codex_cli_rs/0.159.0");
+    expect(options.headers.version).toBe("9.9.9");
+    expect(options.headers["User-Agent"]).toBe("codex_cli_rs/9.9.9");
     expect(body.model).toBe("gpt-6-luna");
     expect(body.instructions).toBe("");
     expect(body.input[0].type).toBe("additional_tools");
