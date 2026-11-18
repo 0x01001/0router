@@ -91,7 +91,11 @@ if ($DryRun) {
   Write-Step "Strict Cursor probe: $requireCursor"
   Write-Step "Current patch:    $($script:ReleaseInfo.CurrentPatchNumber) (0 means unnumbered)"
   Write-Step "Next release:     $($script:ReleaseInfo.DisplayVersion)"
-  & "$ScriptDir\deploy-windows.ps1" -DryRun -InstallDir $resolvedInstallDir
+  & "$ScriptDir\deploy-windows.ps1" -DryRun -InstallDir $resolvedInstallDir -ReleaseMetadata @{
+    BaseVersion     = $script:ReleaseInfo.BaseVersion
+    NextPatchNumber = $script:ReleaseInfo.NextPatchNumber
+    DisplayVersion  = $script:ReleaseInfo.DisplayVersion
+  }
   exit 0
 }
 

@@ -3,7 +3,7 @@
   Deploy an existing local build (cli\app) into the installed 9Router bundle.
 
 .DESCRIPTION
-  Native Windows equivalent of `make deploy`. Does not build - run
+  Native Windows equivalent of `make deploy-only`. Does not build - run
   scripts\build-windows.ps1 first if cli\app is missing. If a running
   instance is detected (CLI process or port listener), stops it, copies
   the bundle, then starts it again and waits for /v1/models health.
@@ -55,11 +55,44 @@ function Assert-BuiltBundle {
   if (-not (Test-Path $customServer)) {
     throw @"
 No build found at cli\app.
-Run 'scripts\build-windows.ps1' first (or 'make release' on macOS/Linux), then retry deploy.
+Run 'scripts\build-windows.ps1' first or use 'make deploy' (build + deploy in one step).
 "@
   }
   if (-not (Test-Path $SourceCli)) {
     throw "Missing source CLI launcher: $SourceCli"
+  }
+}
+
+# `make deploy-only` never builds: warn when cli/app is older than the source it
+# should contain, otherwise a stale bundle (and its baked-in patch number) ships.
+function Test-StaleBuild {
+  $buildId = Join-Path (Join-Path $SourceApp ".next-cli-build") "BUILD_ID"
+  if (-not (Test-Path -LiteralPath $buildId)) { return }
+  $builtAt = (Get-Item -LiteralPath $buildId).LastWriteTime
+  # Use git (fast) instead of walking the tree: last commit time + uncommitted files.
+  $changedAt = $null
+  $changedWhat = ""
+  try {
+    $ct = (& git -C $RootDir log -1 --format=%ct 2>$null)
+    if ($ct -match '^\d+$') {
+      $changedAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$ct).LocalDateTime
+      $changedWhat = "last commit"
+    }
+    $dirty = @(& git -C $RootDir status --porcelain --untracked-files=no 2>$null)
+    foreach ($line in $dirty) {
+      if ($line.Length -lt 4) { continue }
+      $rel = $line.Substring(3).Trim('"')
+      if ($rel -like "* -> *") { $rel = ($rel -split " -> ")[-1] }
+      $full = Join-Path $RootDir $rel
+      if (Test-Path -LiteralPath $full -PathType Leaf) {
+        $mt = (Get-Item -LiteralPath $full).LastWriteTime
+        if (-not $changedAt -or $mt -gt $changedAt) { $changedAt = $mt; $changedWhat = $rel }
+      }
+    }
+  } catch { return }
+  if ($changedAt -and $changedAt -gt $builtAt) {
+    Write-Warning "cli/app was built $builtAt but source changed $changedAt ($changedWhat)."
+    Write-Warning "make deploy-only does NOT rebuild - you are deploying a stale bundle. Use make deploy (build + patch bump + deploy)."
   }
 }
 
@@ -199,6 +232,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 }
 
 Assert-BuiltBundle
+if (-not $ReleaseMetadata) { Test-StaleBuild }
 $InstallDir = Resolve-InstallDir
 $InstalledApp = Join-Path $InstallDir "app"
 $InstalledCli = Join-Path $InstallDir "cli.js"
@@ -244,9 +278,18 @@ Write-Step "Backing up installed bundle to $backupDir"
 Copy-Item -Path $InstalledApp -Destination (Join-Path $backupDir "app") -Recurse -Force
 Copy-Item -Path $InstalledCli -Destination (Join-Path $backupDir "cli.js") -Force
 
+# Keep the local release marker across a plain deploy so the patch counter is
+# not reset (release passes -ReleaseMetadata and rewrites it below).
+$markerPath = Join-Path $InstalledApp $script:LocalReleaseFileName
+$savedMarker = if (Test-Path -LiteralPath $markerPath) { [System.IO.File]::ReadAllText($markerPath) } else { $null }
+
 Write-Step "Deploying $SourceApp -> $InstalledApp"
 Remove-Item -Path $InstalledApp -Recurse -Force
 Copy-Item -Path $SourceApp -Destination $InstalledApp -Recurse -Force
+if ($savedMarker -and -not $ReleaseMetadata) {
+  [System.IO.File]::WriteAllText($markerPath, $savedMarker, (New-Object System.Text.UTF8Encoding $false))
+  Write-Step "Preserved local release marker (patch counter unchanged; run 'make deploy' to bump it)"
+}
 Copy-Item -Path $SourceCli -Destination $InstalledCli -Force
 
 if ($wasRunning) {

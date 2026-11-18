@@ -40,7 +40,7 @@ ifneq ($(strip $(NODE_BIN)),)
 export NODE_BIN
 endif
 
-.PHONY: help install build deploy release release-strict release-no-test release-dry-run release-check deploy-dry-run
+.PHONY: help install build deploy deploy-only deploy-only-dry-run release release-strict release-no-test release-dry-run release-check deploy-dry-run
 
 ifeq ($(OS),Windows_NT)
 help:
@@ -51,23 +51,24 @@ help:
 	  'Local 9Router targets:' \
 	  '  make install          Install npm deps (repo root + cli).' \
 	  '  make build            Build CLI bundle to cli/app (no deploy).' \
-	  '  make deploy           Copy cli/app into installed 9router; stop/restart if running.' \
-	  '  make release          Test, build, backup, replace, restart, and health-check.' \
+	  '  make deploy           Test, build, bump patch #, backup, replace, restart (= make release).' \
+	  '  make deploy-only      Copy existing cli/app as-is (no build, no patch bump).' \
+	  '  make release          Same as make deploy.' \
 	  '  make release-strict   Same, but rollback unless cu/default returns real content.' \
 	  '  make release-no-test  Skip unit tests; build and deploy (not recommended).' \
 	  '  make release-dry-run  Print the release plan without changing anything.' \
 	  '  make release-check    Validate script syntax and run the dry-run preflight.' \
-	  '  make deploy-dry-run   Print the deploy plan without changing anything.' \
+	  '  make deploy-dry-run   Print the deploy (release) plan without changing anything.' \
 	  '' \
 	  'Step by step (macOS / Linux):' \
 	  '  0. Prereqs: node, npm, make, curl, lsof' \
 	  '  1. make install                                          (first time only)' \
-	  '  2. make release INSTALL_DIR=$$(npm root -g)/9router NODE_BIN=$$(which node)' \
-	  '     -> test + build + deploy in one step (recommended)' \
+	  '  2. make deploy INSTALL_DIR=$$(npm root -g)/9router NODE_BIN=$$(which node)' \
+	  '     -> test + build + patch bump + deploy in one step' \
 	  '  OR split build and deploy:' \
 	  '     make build' \
-	  '     make deploy INSTALL_DIR=$$(npm root -g)/9router NODE_BIN=$$(which node)' \
-	  '  3. make deploy fails if cli/app is missing - run make release or make build first' \
+	  '     make deploy-only INSTALL_DIR=$$(npm root -g)/9router NODE_BIN=$$(which node)' \
+	  '  3. make deploy-only fails if cli/app is missing - run make build first' \
 	  '  4. Data preserved at ~/.9router (DB, credentials - not touched)' \
 	  '' \
 	  'Optional overrides:' \
@@ -84,10 +85,16 @@ install:
 build:
 	npm --prefix cli run build
 
-deploy:
+# `make deploy` = full release: test + build (bakes the next patch #) + deploy.
+# A copy-only deploy shipped stale cli/app bundles; that is now `deploy-only`.
+deploy: release
+
+deploy-dry-run: release-dry-run
+
+deploy-only:
 	@$(DEPLOY_SCRIPT)
 
-deploy-dry-run:
+deploy-only-dry-run:
 ifeq ($(OS),Windows_NT)
 	@$(POWERSHELL) scripts/deploy-windows.ps1 -DryRun
 else
