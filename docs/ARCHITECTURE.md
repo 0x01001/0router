@@ -533,6 +533,7 @@ Runtime visibility sources:
 Environment variables actively used by code:
 
 - App/auth: `JWT_SECRET`, `INITIAL_PASSWORD`
+- Dashboard session: `DASHBOARD_SESSION_TTL_SECONDS` sets JWT and cookie lifetime for new logins (1–2592000 seconds; defaults to 604800 if unset or invalid)
 - Storage: `DATA_DIR`
 - Security hashing: `API_KEY_SECRET`, `MACHINE_ID_SALT`
 - Logging: `ENABLE_REQUEST_LOGS`

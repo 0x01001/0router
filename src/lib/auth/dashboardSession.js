@@ -7,7 +7,11 @@ import { DATA_DIR } from "@/lib/dataDir";
 import { getSettings } from "@/lib/localDb";
 
 const DEFAULT_PASSWORD = "123456";
-const SESSION_MAX_AGE_SEC = 24 * 60 * 60;
+const DAY_SEC = 24 * 60 * 60;
+const configuredTtl = Number(process.env.DASHBOARD_SESSION_TTL_SECONDS);
+const SESSION_MAX_AGE_SEC = Number.isInteger(configuredTtl) && configuredTtl > 0 && configuredTtl <= 30 * DAY_SEC
+  ? configuredTtl
+  : 7 * DAY_SEC;
 
 function loadJwtSecret() {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
@@ -31,10 +35,11 @@ export function shouldUseSecureCookie(request) {
 }
 
 export async function createDashboardAuthToken(claims = {}) {
+  const issuedAt = Math.floor(Date.now() / 1000);
   return new SignJWT({ authenticated: true, ...claims })
     .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setExpirationTime("24h")
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + SESSION_MAX_AGE_SEC)
     .sign(SECRET);
 }
 

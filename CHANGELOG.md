@@ -1,5 +1,8 @@
 # Unreleased
 
+## Features
+- **Dashboard**: login sessions default to 7 days and can be configured with `DASHBOARD_SESSION_TTL_SECONDS` (up to 30 days).
+
 ## Fixes
 - **Cursor**: parse the Connect end-of-stream trailer from AgentService so billing/quota/auth failures (e.g. `ERROR_USAGE_PRICING_REQUIRED` "buy credits") surface as HTTP 402/429/401 with Cursor's message instead of an empty 200 completion with 0 tokens; account fallback and cooldown now trigger
 
